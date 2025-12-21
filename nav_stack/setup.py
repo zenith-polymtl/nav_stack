@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'lap = nav_stack.lap:main',
             'scan = nav_stack.scan:main',
+            'init = nav_stack.init:main',
         ],
     },
 )
