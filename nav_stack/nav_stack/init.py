@@ -100,6 +100,7 @@ class MissionInit(Node):
         self.takeoff_pub = self.create_publisher(PoseStamped, '/drone/takeoff_cmd', 10)
         self.waypoint_pub = self.create_publisher(PoseStamped, '/mission/waypoint', 10)
         self.rtl_pub = self.create_publisher(Bool, '/drone/rtl', 10)
+        self.home_pub = self.create_publisher(NavSatFix, '/mission/takeoff_point', 10)
 
         self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, 10)
 
@@ -118,6 +119,12 @@ class MissionInit(Node):
         self.go = msg.data
         if self.go and self.ready and self.internal_ok and self.external_ok:
             self.start_mission()
+            self.home = NavSatFix()
+            self.home.latitude = self.current_lat
+            self.home.longitude = self.current_lon
+            self.home.altitude = self.current_alt
+            self.home_pub.publish(self.home)
+            
 
     def callback_abort(self, msg):
         if msg.data:
