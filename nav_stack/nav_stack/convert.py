@@ -6,7 +6,7 @@ from geopy.distance import distance
 from sensor_msgs.msg import NavSatFix
 from geometry_msgs.msg import PoseStamped
 
-from custom_interfaces.srv import ConvertGpsToLocal  # prefer PascalCase name
+from custom_interfaces.srv import ConvertGpsToLocal
 
 
 class GpsPoint:
