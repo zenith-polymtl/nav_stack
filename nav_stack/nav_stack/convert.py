@@ -62,7 +62,7 @@ class GpsToLocal(Node):
             dE = -dE
 
         # Up (m) relative to home
-        dU = alt - ref_alt
+        dU = alt
 
         local_pos = PoseStamped()
         local_pos.header.stamp = self.get_clock().now().to_msg()

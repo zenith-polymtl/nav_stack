@@ -14,16 +14,19 @@ class MissionInit(Node):
 
         
         self.ready = False
+        self.home_set = False
         self.internal_ok = False
         self.external_ok = False
         self.go = False
         self.finished_takeoff = False
+        self.takeoff_accepted = False
+        self.successful_message_requests = 0
 
         self.set_up_parameters()
         self.set_up_services()
         self.set_up_topics()
 
-        self.odom_rate = 25.0  # Desired rate for ODOM and ODOM_COV messages
+        self.odom_rate = 25.0  # Desired rate for ODOM and controller messages
         # TODO : add parameter for odom rate
     
         #Create time to check and update state
@@ -32,7 +35,8 @@ class MissionInit(Node):
 
         self.msg_interval_client = self.create_client(MessageInterval, '/mavros/set_message_interval')
         # run once, 1s after startup
-        self.setup_timer = self.create_timer(1.0, self.setup_message_intervals)
+
+        self.setup_message_intervals()
 
         self.get_logger().info("init node ready.")
 
@@ -58,17 +62,21 @@ class MissionInit(Node):
 
             future2 = self.msg_interval_client.call_async(request)  
             future2.add_done_callback(self.message_interval_callback)
-            
-        # Destroy the timer since we only need to run this once  
-        self.destroy_timer(self.setup_timer) 
 
     def message_interval_callback(self, future):  
         try:  
             response = future.result()  
             if response.success:  
                 self.get_logger().info("Message interval set successfully")  
+                self.successful_message_requests += 1
+                if self.successful_message_requests >= 2:
+                    self.get_logger().info("All message intervals set successfully")
+
+                    if hasattr(self, 'setup_timer'):
+                        self.destroy_timer(self.setup_timer)
             else:  
-                self.get_logger().error("Failed to set message interval")  
+                self.get_logger().error("Failed to set message interval, retrying...")  
+                self.setup_timer = self.create_timer(5.0, self.setup_message_intervals)
         except Exception as e:  
             self.get_logger().error(f"Service call failed: {e}") 
 
@@ -103,7 +111,6 @@ class MissionInit(Node):
         self.home_pub = self.create_publisher(NavSatFix, '/mission/takeoff_point', 10)
 
         self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, 10)
-
         #ici y a les subsciptions (le go, abort, internal, external) 
         self.go_sub = self.create_subscription(Bool, '/mission/go', self.callback_go, 10)
         self.abort_sub = self.create_subscription(Bool, '/mission/abort', self.callback_abort, 10)
@@ -114,16 +121,21 @@ class MissionInit(Node):
         self.current_alt = msg.altitude
 
         self.internal_ok = True  # Placeholder for actual internal readiness check
+        #This message received means GPS stream is working, decent check
+        if not self.home_set:
+            home_msg = NavSatFix()
+            home_msg.latitude = self.current_lat
+            home_msg.longitude = self.current_lon
+            home_msg.altitude = self.current_alt
+            self.home_pub.publish(home_msg)
+            self.home_set = True
+            self.get_logger().info(f"Home position set to lat={self.current_lat}, lon={self.current_lon}, alt={self.current_alt}")
         
     def callback_go(self, msg):
         self.go = msg.data
         if self.go and self.ready and self.internal_ok and self.external_ok:
             self.start_mission()
-            self.home = NavSatFix()
-            self.home.latitude = self.current_lat
-            self.home.longitude = self.current_lon
-            self.home.altitude = self.current_alt
-            self.home_pub.publish(self.home)
+            
             
 
     def callback_abort(self, msg):
@@ -160,24 +172,37 @@ class MissionInit(Node):
         future.add_done_callback(self.confirm_takeoff)  
 
         self.ground_takeoff_height = self.current_alt
-        self.check_takeoff_timer = self.create_timer(0.5, self.check_takeoff_completion)
 
     def check_takeoff_completion(self):
         if not self.finished_takeoff:
             self.finished_takeoff = (self.current_alt - self.ground_takeoff_height) >= (self.takeoff_alt - 2.0)
         else:
             self.status_pub.publish(Bool(data=True))  # Indicate takeoff finished
-            self.get_logger().info("Takeoff completed. Initializing finished")
             self.destroy_timer(self.check_takeoff_timer)
+            self.get_logger().info("Takeoff completed. Initializing finished")
             self.destroy_subscription(self.gps_sub)
 
     def confirm_takeoff(self, future):
         try:  
             response = future.result()  
             if response.success:  
-                self.get_logger().info("Takeoff command succeeded")  
+                self.get_logger().info("Takeoff command succeeded")
+                # Verify if there is no takeoff timer
+                if not hasattr(self, 'check_takeoff_timer'):
+                    self.check_takeoff_timer = self.create_timer(
+                        0.5, self.check_takeoff_completion
+                    )
+                self.takeoff_accepted = True  
             else:  
-                self.get_logger().error(f"Takeoff failed: {response.result}")  
+                  
+                if response.result == 4:
+                    if self.takeoff_accepted:
+                        self.get_logger().error("Takeoff rejected: Vehicle is already in air.")
+                    else:
+                        self.get_logger().error("Please check if vehicule is in GUIDED mode and armed.")
+                else:
+                    self.get_logger().error(f"Takeoff failed: {response.result}")
+
         except Exception as e:  
             self.get_logger().error(f"Takeoff service call failed: {e}")  
 
