@@ -40,28 +40,31 @@ class MissionInit(Node):
 
         self.get_logger().info("init node ready.")
 
+    def make_request(self, message_id, message_rate):
+        request = MessageInterval.Request()  
+        request.message_id = message_id  
+        request.message_rate = message_rate  
+
+        future = self.msg_interval_client.call_async(request)  
+        future.add_done_callback(self.message_interval_callback) 
+
     
     def setup_message_intervals(self):
         if True:
             """Set up message intervals after node initialization"""  
             if not self.msg_interval_client.wait_for_service(timeout_sec=5.0):  
                 self.get_logger().warn('Message interval service not available, aborting request...')  
-                self.destroy_timer(self.setup_timer) 
-                return  
+                return 
+
+            #global position messages
+            self.make_request(33, self.odom_rate)
+
+            #local position messages
+            self.make_request(32, self.odom_rate)  
+
+            #Controller messages
+            self.make_request(65, self.odom_rate) 
             
-            request = MessageInterval.Request()  
-            request.message_id = 32  
-            request.message_rate = self.odom_rate
-
-            request2 = MessageInterval.Request()  
-            request2.message_id = 33  
-            request2.message_rate = self.odom_rate
-
-            future = self.msg_interval_client.call_async(request2)  
-            future.add_done_callback(self.message_interval_callback) 
-
-            future2 = self.msg_interval_client.call_async(request)  
-            future2.add_done_callback(self.message_interval_callback)
 
     def message_interval_callback(self, future):  
         try:  
@@ -69,7 +72,7 @@ class MissionInit(Node):
             if response.success:  
                 self.get_logger().info("Message interval set successfully")  
                 self.successful_message_requests += 1
-                if self.successful_message_requests >= 2:
+                if self.successful_message_requests >= 3:
                     self.get_logger().info("All message intervals set successfully")
 
                     if hasattr(self, 'setup_timer'):
