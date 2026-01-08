@@ -219,8 +219,7 @@ class MissionInit(Node):
     def global_abort(self):
         self.status_pub.publish(String(data="ABORT"))
         self.rtl_pub.publish(Bool(data=True))
-        self.drone.set_mode("RTL")
-
+        
         self.get_logger().warn("GLOBAL ABORT RTL engaged.")
 
 
