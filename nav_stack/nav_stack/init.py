@@ -113,7 +113,13 @@ class MissionInit(Node):
         self.rtl_pub = self.create_publisher(Bool, '/drone/rtl', 10)
         self.home_pub = self.create_publisher(NavSatFix, '/mission/takeoff_point', 10)
 
-        self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, 10)
+        self.BE_qos = rclpy.qos.QoSProfile(
+            reliability=rclpy.qos.QoSReliabilityPolicy.BEST_EFFORT,
+            history=rclpy.qos.QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, self.BE_qos)
         #ici y a les subsciptions (le go, abort, internal, external) 
         self.go_sub = self.create_subscription(Bool, '/mission/go', self.callback_go, 10)
         self.abort_sub = self.create_subscription(Bool, '/mission/abort', self.callback_abort, 10)
