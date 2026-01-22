@@ -21,6 +21,7 @@ class GpsToLocal(Node):
         super().__init__("gps_to_local")
 
         self.home = None  # important
+        self.home_set = False
 
         self.create_subscription(
             NavSatFix, "/mission/takeoff_point", self.set_origin_callback, 10
@@ -33,14 +34,19 @@ class GpsToLocal(Node):
         self.get_logger().info("gps_to_local node started.")
 
     def set_origin_callback(self, msg: NavSatFix):
+        if msg.latitude == 0.0 and msg.longitude == 0.0:
+            self.get_logger().warn("Received invalid GPS origin (0.0, 0.0). Ignoring.")
+            return
         self.home = GpsPoint(msg.latitude, msg.longitude, msg.altitude)
+        self.home_set = True
         self.get_logger().info(
             f"Origin set: lat={msg.latitude:.6f}, lon={msg.longitude:.6f}, alt={msg.altitude:.2f}"
         )
 
     def convert_to_local(self, request, response):
-        if self.home is None:
+        if not self.home_set:
             response.local_point = PoseStamped()
+            response.success = False
             self.get_logger().warn("Service called but origin not set yet.")
             return response
 
@@ -49,7 +55,13 @@ class GpsToLocal(Node):
         lon = float(fix.longitude)
         alt = float(fix.altitude)
 
+        self.get_logger().info(
+            f"Converting GPS point: lat={lat:.6f}, lon={lon:.6f}, alt={alt:.2f}"
+        )
+
         ref_lat, ref_lon, ref_alt = self.home.lat, self.home.lon, self.home.alt
+
+
 
         # Northing (m)
         dN = distance((ref_lat, ref_lon), (lat, ref_lon)).meters
@@ -74,6 +86,10 @@ class GpsToLocal(Node):
         local_pos.pose.position.z = float(dU)
 
         response.local_point = local_pos
+        self.get_logger().info(
+            f"Converted to local ENU: x={dE:.2f}, y={dN:.2f}, z={dU:.2f}"
+        )
+        response.success = True
         return response
 
 

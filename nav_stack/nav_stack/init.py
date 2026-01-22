@@ -87,29 +87,17 @@ class MissionInit(Node):
         self.declare_parameter("takeoff_alt", 10.0)
         self.takeoff_alt = self.get_parameter("takeoff_alt").value
 
-        default_waypoint = -74.0, 36.0, 10.0
-
-        # parametres x, y, z coord du point avec des valeurs par defaut (5, 5, 10)
-        self.declare_parameter("waypoint1_lat", default_waypoint[0])
-        self.declare_parameter("waypoint1_lon", default_waypoint[1])
-        self.declare_parameter("waypoint1_height", default_waypoint[2])
-
-        # recupere les coord
-        self.waypoint1_lat = self.get_parameter("waypoint1_lat").value
-        self.waypoint1_lon = self.get_parameter("waypoint1_lon").value
-        self.waypoint1_height = self.get_parameter("waypoint1_height").value
-
     def set_up_services(self):
         
         self.takeoff_client = self.create_client(  
             CommandTOL, '/mavros/cmd/takeoff'  
         )  
 
+
     def set_up_topics(self):
         #ici y a les publishers (etat, takeoff, rtl)
         self.status_pub = self.create_publisher(Bool, '/mission/increment_state', 10)   #noms des topics hardcoded mais je vais changer ca
         self.takeoff_pub = self.create_publisher(PoseStamped, '/drone/takeoff_cmd', 10)
-        self.waypoint_pub = self.create_publisher(PoseStamped, '/mission/waypoint', 10)
         self.rtl_pub = self.create_publisher(Bool, '/drone/rtl', 10)
         self.home_pub = self.create_publisher(NavSatFix, '/mission/takeoff_point', 10)
 
@@ -131,7 +119,7 @@ class MissionInit(Node):
 
         self.internal_ok = True  # Placeholder for actual internal readiness check
         #This message received means GPS stream is working, decent check
-        if not self.home_set:
+        if not self.home_set and msg.latitude != 0.0 and msg.longitude != 0.0:
             home_msg = NavSatFix()
             home_msg.latitude = self.current_lat
             home_msg.longitude = self.current_lon
@@ -139,13 +127,13 @@ class MissionInit(Node):
             self.home_pub.publish(home_msg)
             self.home_set = True
             self.get_logger().info(f"Home position set to lat={self.current_lat}, lon={self.current_lon}, alt={self.current_alt}")
+
+            
         
     def callback_go(self, msg):
         self.go = msg.data
         if self.go and self.ready and self.internal_ok and self.external_ok:
             self.start_mission()
-            
-            
 
     def callback_abort(self, msg):
         if msg.data:
