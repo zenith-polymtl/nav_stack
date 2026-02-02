@@ -100,6 +100,7 @@ class MissionInit(Node):
         self.takeoff_pub = self.create_publisher(PoseStamped, '/drone/takeoff_cmd', 10)
         self.rtl_pub = self.create_publisher(Bool, '/drone/rtl', 10)
         self.home_pub = self.create_publisher(NavSatFix, '/mission/takeoff_point', 10)
+        self.take_completed_pub = self.create_publisher(Bool, '/mission/takeoff_completed', 10)
 
         self.BE_qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.BEST_EFFORT,
@@ -177,6 +178,9 @@ class MissionInit(Node):
             self.status_pub.publish(Bool(data=True))  # Indicate takeoff finished
             self.destroy_timer(self.check_takeoff_timer)
             self.get_logger().info("Takeoff completed. Initializing finished")
+            takeoff_is_complet_msg = Bool()
+            takeoff_is_complet_msg.data = True
+            self.take_completed_pub.publish(takeoff_is_complet_msg)
             self.destroy_subscription(self.gps_sub)
 
     def confirm_takeoff(self, future):
@@ -199,6 +203,11 @@ class MissionInit(Node):
                         self.get_logger().error("Please check if vehicule is in GUIDED mode and armed.")
                 else:
                     self.get_logger().error(f"Takeoff failed: {response.result}")
+                
+                takeoff_is_complet_msg = Bool()
+                takeoff_is_complet_msg.data = False
+                self.take_completed_pub.publish(takeoff_is_complet_msg)
+
 
         except Exception as e:  
             self.get_logger().error(f"Takeoff service call failed: {e}")  
