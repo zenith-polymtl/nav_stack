@@ -8,6 +8,14 @@ from mavros_msgs.srv import CommandTOL
 from mavros_msgs.srv import MessageInterval 
 from sensor_msgs.msg import NavSatFix
 
+
+from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.msg import Parameter as ParameterMsg
+from rcl_interfaces.msg import ParameterValue, ParameterType
+
+from geometry_msgs.msg import TransformStamped
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+
 class MissionInit(Node):
     def __init__(self):
         super().__init__('mission_init')
@@ -25,6 +33,11 @@ class MissionInit(Node):
         self.set_up_parameters()
         self.set_up_services()
         self.set_up_topics()
+
+        self.tf_request_sent = False
+
+        self.send_true_timer = self.create_timer(2.0, self.set_tf_send_true)
+        self.send_static_transform()
 
         self.odom_rate = 25.0  # Desired rate for ODOM and controller messages
         # TODO : add parameter for odom rate
@@ -87,6 +100,16 @@ class MissionInit(Node):
         self.declare_parameter("takeoff_alt", 10.0)
         self.takeoff_alt = self.get_parameter("takeoff_alt").value
 
+        self.declare_parameter("static_tf.parent_frame_name", "gimbal_link")
+        self.declare_parameter("static_tf.child_frame_name", "camera_link")
+        self.declare_parameter("static_tf.translation", [0.084, 0.0, -0.126])
+        self.declare_parameter("static_tf.rotation", [0.0, -0.382683, 0.0, 0.923880])
+
+        self.static_tf_parent_frame_name = self.get_parameter("static_tf.parent_frame_name").value
+        self.static_tf_child_frame_name = self.get_parameter("static_tf.child_frame_name").value
+        self.static_tf_translation = self.get_parameter("static_tf.translation").value
+        self.static_tf_rotation = self.get_parameter("static_tf.rotation").value
+
     def set_up_services(self):
         
         self.takeoff_client = self.create_client(  
@@ -112,6 +135,73 @@ class MissionInit(Node):
         #ici y a les subsciptions (le go, abort, internal, external) 
         self.go_sub = self.create_subscription(Bool, '/mission/go', self.callback_go, 10)
         self.abort_sub = self.create_subscription(Bool, '/mission/abort', self.callback_abort, 10)
+
+
+    def set_tf_send_true(self):
+        client = self.create_client(SetParameters, '/mavros/local_position/set_parameters')
+
+        if not client.service_is_ready():
+            self.get_logger().info('Waiting for /mavros/local_position/set_parameters...')
+            return
+
+        req = SetParameters.Request()
+        req.parameters = [
+            ParameterMsg(
+                name='tf.send',
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_BOOL,
+                    bool_value=True
+                )
+            )
+        ]
+
+        future = client.call_async(req)
+        future.add_done_callback(self.set_tf_send_true_done)
+
+        self.destroy_timer(self.send_true_timer)
+
+
+    def set_tf_send_true_done(self, future):
+        try:
+            resp = future.result()
+            for i, result in enumerate(resp.results):
+                if result.successful:
+                    self.get_logger().info('Successfully set "tf.send" to True')
+                else:
+                    self.get_logger().error(
+                        f'Failed to set parameter #{i}: {result.reason}'
+                    )
+        except Exception as e:
+            self.get_logger().error(f'SetParameters call failed: {e}')
+
+
+    def send_static_transform(self, parent_frame_name: str = None, child_frame_name: str = None, translation: list = None, rotation: list = None):
+        if parent_frame_name is None:
+            parent_frame_name = self.static_tf_parent_frame_name
+        if child_frame_name is None:
+            child_frame_name = self.static_tf_child_frame_name
+        if translation is None:
+            translation = self.static_tf_translation
+        if rotation is None:
+            rotation = self.static_tf_rotation
+        self.broadcaster = StaticTransformBroadcaster(self)
+
+        t = TransformStamped()
+        t.header.stamp = self.get_clock().now().to_msg()
+        t.header.frame_id = parent_frame_name
+        t.child_frame_id = child_frame_name
+
+        t.transform.translation.x = float(translation[0])
+        t.transform.translation.y = float(translation[1])
+        t.transform.translation.z = float(translation[2])
+
+        t.transform.rotation.x = float(rotation[0])
+        t.transform.rotation.y = float(rotation[1])
+        t.transform.rotation.z = float(rotation[2])
+        t.transform.rotation.w = float(rotation[3])
+
+        self.broadcaster.sendTransform(t)
+        self.get_logger().info(f'Published static transform {parent_frame_name} -> {child_frame_name}')
 
     def callback_gps(self, msg):
         self.current_lat = msg.latitude
