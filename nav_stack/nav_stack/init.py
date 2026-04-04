@@ -133,7 +133,7 @@ class MissionInit(Node):
 
         self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, self.BE_qos)
         #ici y a les subsciptions (le go, abort, internal, external) 
-        self.go_sub = self.create_subscription(Bool, '/mission/go', self.callback_go, 10)
+        self.go_sub = self.create_subscription(Bool, '/aeac/external/mission/go', self.callback_go, 10)
         self.abort_sub = self.create_subscription(Bool, '/mission/abort', self.callback_abort, 10)
 
 
