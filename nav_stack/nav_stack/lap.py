@@ -1,114 +1,208 @@
 #!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 
-from std_msgs.msg import Bool, String
-from geometry_msgs.msg import PoseStamped, Vector3 
-from mavros_msgs.srv import CommandTOL
-from mavros_msgs.srv import MessageInterval 
-from sensor_msgs.msg import NavSatFix
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+from nav2_msgs.action import FollowPath
 
-class MissionInit(Node):
+from lifecycle_msgs.srv import ChangeState
+from lifecycle_msgs.msg import Transition
+
+
+class SendPathWithControl(Node):
     def __init__(self):
-        super().__init__('mission_init')
+        super().__init__("send_path_with_control")
 
-        
-        self.ready = False
-        self.internal_ok = False
-        self.external_ok = False
-        self.go = False
-        self.finished_takeoff = False
+        self.declare_parameter("frame_id", "map")
+        self.declare_parameter("action_name", "follow_path")
+        self.declare_parameter("controller_id", "FollowPath")
+        self.declare_parameter("goal_checker_id", "goal_checker")
+        self.declare_parameter("progress_checker_id", "progress_checker")
 
-        self.set_up_parameters()
-        self.set_up_services()
-        self.set_up_topics()
+        self.frame_id = self.get_parameter("frame_id").value
+        self.action_name = self.get_parameter("action_name").value
+        self.controller_id = self.get_parameter("controller_id").value
+        self.goal_checker_id = self.get_parameter("goal_checker_id").value
+        self.progress_checker_id = self.get_parameter("progress_checker_id").value
 
-        self.odom_rate = 25.0  # Desired rate for ODOM and ODOM_COV messages
-        # TODO : add parameter for odom rate
-    
-        #Create time to check and update state
-        
-        self.create_timer(1.0, self.check_state)
+        self.follow_client = ActionClient(self, FollowPath, self.action_name)
+        self.goal_handle = None
 
-        self.msg_interval_client = self.create_client(MessageInterval, '/mavros/set_message_interval')
-        # run once, 1s after startup
-        self.setup_timer = self.create_timer(1.0, self.setup_message_intervals)
+        self.controller_change_state = self.create_client(
+            ChangeState, "/controller_server/change_state"
+        )
+        self.costmap_change_state = self.create_client(
+            ChangeState, "/local_costmap/local_costmap/change_state"
+        )
 
-        self.get_logger().info("init node ready.")
+    def wait_lifecycle_services(self):
+        if not self.controller_change_state.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error("controller_server change_state service not available")
+            return False
+        if not self.costmap_change_state.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error("local_costmap change_state service not available")
+            return False
+        return True
 
-    
-    def setup_message_intervals(self):
-        if True:
-            """Set up message intervals after node initialization"""  
-            if not self.msg_interval_client.wait_for_service(timeout_sec=5.0):  
-                self.get_logger().warn('Message interval service not available, aborting request...')  
-                self.destroy_timer(self.setup_timer) 
-                return  
-            
-            request = MessageInterval.Request()  
-            request.message_id = 32  
-            request.message_rate = self.odom_rate
+    def change_state(self, client, transition_id, name):
+        req = ChangeState.Request()
+        req.transition.id = transition_id
+        future = client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
 
-            request2 = MessageInterval.Request()  
-            request2.message_id = 33  
-            request2.message_rate = self.odom_rate
+        if future.result() is None:
+            self.get_logger().error(f"Failed transition on {name}")
+            return False
 
-            future = self.msg_interval_client.call_async(request2)  
-            future.add_done_callback(self.message_interval_callback) 
+        if not future.result().success:
+            self.get_logger().error(f"Transition refused on {name}")
+            return False
 
-            future2 = self.msg_interval_client.call_async(request)  
-            future2.add_done_callback(self.message_interval_callback)
-            
-        # Destroy the timer since we only need to run this once  
-        self.destroy_timer(self.setup_timer) 
+        self.get_logger().info(f"{name}: transition {transition_id} success")
+        return True
 
-    def set_up_parameters(self):
-        self.declare_parameter("takeoff_alt", 10.0)
-        self.takeoff_alt = self.get_parameter("takeoff_alt").value
+    def start_controller(self):
+        if not self.wait_lifecycle_services():
+            return False
 
-        default_waypoint = -74.0, 36.0, 10.0
+        ok1 = self.change_state(
+            self.costmap_change_state,
+            Transition.TRANSITION_CONFIGURE,
+            "local_costmap"
+        )
+        ok2 = self.change_state(
+            self.controller_change_state,
+            Transition.TRANSITION_CONFIGURE,
+            "controller_server"
+        )
+        ok3 = self.change_state(
+            self.costmap_change_state,
+            Transition.TRANSITION_ACTIVATE,
+            "local_costmap"
+        )
+        ok4 = self.change_state(
+            self.controller_change_state,
+            Transition.TRANSITION_ACTIVATE,
+            "controller_server"
+        )
 
-        # parametres x, y, z coord du point avec des valeurs par defaut (5, 5, 10)
-        self.declare_parameter("waypoint1_lat", default_waypoint[0])
-        self.declare_parameter("waypoint1_lon", default_waypoint[1])
-        self.declare_parameter("waypoint1_height", default_waypoint[2])
+        return ok1 and ok2 and ok3 and ok4
 
-        # recupere les coord
-        self.waypoint1_lat = self.get_parameter("waypoint1_lat").value
-        self.waypoint1_lon = self.get_parameter("waypoint1_lon").value
-        self.waypoint1_height = self.get_parameter("waypoint1_height").value
+    def stop_controller(self):
+        if not self.wait_lifecycle_services():
+            return False
 
-    def set_up_topics(self):
-        #ici y a les publishers (etat, takeoff, rtl)
-        self.status_pub = self.create_publisher(Bool, '/mission/increment_state', 10)   #noms des topics hardcoded mais je vais changer ca
-        self.takeoff_pub = self.create_publisher(PoseStamped, '/drone/takeoff_cmd', 10)
-        self.waypoint_pub = self.create_publisher(PoseStamped, '/mission/waypoint', 10)
-        self.rtl_pub = self.create_publisher(Bool, '/drone/rtl', 10)
+        self.cancel_goal()
 
-        self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, 10)
+        ok1 = self.change_state(
+            self.controller_change_state,
+            Transition.TRANSITION_DEACTIVATE,
+            "controller_server"
+        )
+        ok2 = self.change_state(
+            self.costmap_change_state,
+            Transition.TRANSITION_DEACTIVATE,
+            "local_costmap"
+        )
 
-        #ici y a les subsciptions (le go, abort, internal, external) 
-        self.go_sub = self.create_subscription(Bool, '/mission/go', self.callback_go, 10)
-        self.abort_sub = self.create_subscription(Bool, '/mission/abort', self.callback_abort, 10)
+        return ok1 and ok2
 
-    def callback_gps(self, msg):
-        self.current_lat = msg.latitude
-        self.current_lon = msg.longitude
-        self.current_alt = msg.altitude
+    def make_path(self, pts):
+        path = Path()
+        path.header.frame_id = self.frame_id
+        path.header.stamp = self.get_clock().now().to_msg()
 
-        self.internal_ok = True  # Placeholder for actual internal readiness check
+        for x, y in pts:
+            p = PoseStamped()
+            p.header = path.header
+            p.pose.position.x = float(x)
+            p.pose.position.y = float(y)
+            p.pose.position.z = 0.0
+            p.pose.orientation.w = 1.0
+            path.poses.append(p)
+
+        return path
+
+    def send_path(self, pts):
+        if not self.follow_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().error("FollowPath server not available")
+            return
+
+        goal = FollowPath.Goal()
+        goal.path = self.make_path(pts)
+        goal.controller_id = self.controller_id
+        goal.goal_checker_id = self.goal_checker_id
+        goal.progress_checker_id = self.progress_checker_id
+
+        future = self.follow_client.send_goal_async(goal, feedback_callback=self.feedback_cb)
+        future.add_done_callback(self.goal_response_cb)
+
+    def feedback_cb(self, msg):
+        fb = msg.feedback
+        self.get_logger().info(
+            f"distance_to_goal={fb.distance_to_goal:.2f}, speed={fb.speed:.2f}"
+        )
+
+    def goal_response_cb(self, future):
+        self.goal_handle = future.result()
+        if self.goal_handle is None or not self.goal_handle.accepted:
+            self.get_logger().error("Path goal rejected")
+            return
+
+        self.get_logger().info("Path goal accepted")
+        result_future = self.goal_handle.get_result_async()
+        result_future.add_done_callback(self.result_cb)
+
+    def result_cb(self, future):
+        result = future.result()
+        self.get_logger().info(
+            f"Finished. status={result.status}, error_code={result.result.error_code}"
+        )
+
+    def cancel_goal(self):
+        if self.goal_handle is None:
+            return
+        future = self.goal_handle.cancel_goal_async()
+        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+        self.get_logger().info("Cancel sent")
 
 
+def main():
+    rclpy.init()
+    node = SendPathWithControl()
 
+    path_pts = [
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10, -10.0),
+        (-6.0, -1.0),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10, -10.0),
+        (-6.0, -1.0),
+        (0.0, 0.0),
+        (10.0, 0.0),
+        (10, -10.0),
+        (-6.0, -1.0),
+    ]
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = MissionInit()
+    if not node.start_controller():
+        node.get_logger().error("Could not start controller")
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
+    node.send_path(path_pts)
+
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        node.stop_controller()
         node.destroy_node()
         rclpy.shutdown()
 
