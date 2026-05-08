@@ -123,7 +123,7 @@ class MissionInit(Node):
         self.takeoff_pub = self.create_publisher(PoseStamped, '/drone/takeoff_cmd', 10)
         self.rtl_pub = self.create_publisher(Bool, '/drone/rtl', 10)
         self.home_pub = self.create_publisher(NavSatFix, '/mission/takeoff_point', 10)
-        self.take_completed_pub = self.create_publisher(Bool, '/mission/takeoff_completed', 10)
+        self.take_completed_pub = self.create_publisher(Bool, '/aeac/internal/mission/takeoff_completed', 10)
 
         self.BE_qos = rclpy.qos.QoSProfile(
             reliability=rclpy.qos.QoSReliabilityPolicy.BEST_EFFORT,
@@ -134,7 +134,7 @@ class MissionInit(Node):
         self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, self.BE_qos)
         #ici y a les subsciptions (le go, abort, internal, external) 
         self.go_sub = self.create_subscription(Bool, '/aeac/external/mission/go', self.callback_go, 10)
-        self.abort_sub = self.create_subscription(Bool, '/mission/abort', self.callback_abort, 10)
+        self.abort_sub = self.create_subscription(Bool, '/aeac/external/mission/abort_all', self.callback_abort, 10)
 
 
     def set_tf_send_true(self):
