@@ -305,7 +305,14 @@ class MissionInit(Node):
     def start_mission(self):
 
         self.get_logger().info("GO received : starting mission.")
-
+        if not self.home_set and self.current_lat != 0.0 and self.current_lon != 0.0:
+            home_msg = NavSatFix()
+            home_msg.latitude = self.current_lat
+            home_msg.longitude = self.current_lon
+            home_msg.altitude = self.current_alt
+            self.home_pub.publish(home_msg)
+            self.home_set = True
+        
         self.send_takeoff_command()
 
 
