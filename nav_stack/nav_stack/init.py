@@ -97,7 +97,7 @@ class MissionInit(Node):
             self.get_logger().error(f"Service call failed: {e}") 
 
     def set_up_parameters(self):
-        self.declare_parameter("takeoff_alt", 10.0)
+        self.declare_parameter("takeoff_alt", 30.0)
         self.takeoff_alt = self.get_parameter("takeoff_alt").value
 
         self.declare_parameter("static_tf.parent_frame_name", "gimbal_link")
