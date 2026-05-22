@@ -97,7 +97,7 @@ class MissionInit(Node):
             self.get_logger().error(f"Service call failed: {e}") 
 
     def set_up_parameters(self):
-        self.declare_parameter("takeoff_alt", 30.0)
+        self.declare_parameter("takeoff_alt", 20.0)
         self.takeoff_alt = self.get_parameter("takeoff_alt").value
 
         self.declare_parameter("static_tf.parent_frame_name", "gimbal_link")
@@ -134,7 +134,7 @@ class MissionInit(Node):
         self.gps_sub = self.create_subscription(NavSatFix, '/mavros/global_position/global', self.callback_gps, self.BE_qos)
         #ici y a les subsciptions (le go, abort, internal, external) 
         self.go_sub = self.create_subscription(Bool, '/aeac/external/mission/go', self.callback_go, 10)
-        self.abort_sub = self.create_subscription(Bool, '/aeac/external/mission/abort_all', self.callback_abort, 10)
+        self.abort_sub = self.create_subscription(Bool, '/aeac/external/mission/abort_all_not_working', self.callback_abort, 10)
 
 
     def set_tf_send_true(self):
@@ -216,9 +216,8 @@ class MissionInit(Node):
             home_msg.longitude = self.current_lon
             home_msg.altitude = self.current_alt
             self.home_pub.publish(home_msg)
-            self.home_set = True
             self.get_logger().info(f"Home position set to lat={self.current_lat}, lon={self.current_lon}, alt={self.current_alt}")
-
+            self.home_set = True
             
         
     def callback_go(self, msg):
@@ -306,7 +305,7 @@ class MissionInit(Node):
     def start_mission(self):
 
         self.get_logger().info("GO received : starting mission.")
-        if not self.home_set and self.current_lat != 0.0 and self.current_lon != 0.0:
+        if  self.current_lat != 0.0 and self.current_lon != 0.0:
             home_msg = NavSatFix()
             home_msg.latitude = self.current_lat
             home_msg.longitude = self.current_lon
