@@ -265,6 +265,7 @@ class MissionInit(Node):
         if not self.finished_takeoff:
             self.finished_takeoff = (self.current_alt - self.ground_takeoff_height) >= (self.takeoff_alt - 2.0)
         else:
+            self.home_set = True
             self.status_pub.publish(Bool(data=True))  # Indicate takeoff finished
             self.destroy_timer(self.check_takeoff_timer)
             self.get_logger().info("Takeoff completed. Initializing finished")
@@ -311,7 +312,6 @@ class MissionInit(Node):
             home_msg.longitude = self.current_lon
             home_msg.altitude = self.current_alt
             self.home_pub.publish(home_msg)
-            self.home_set = True
         
         self.send_takeoff_command()
 
