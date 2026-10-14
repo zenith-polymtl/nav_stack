@@ -3,7 +3,7 @@
 <package format="3">
   <name>nav_stack</name>
   <version>1.0.0</version>
-  <description>Shared navigation nodes for Zenith mission repos: stream rates, takeoff point and takeoff on GO (init), GPS to local conversion service (convert)</description>
+  <description>Shared navigation nodes for Zenith mission repos: stream rates and takeoff on GO (init), GPS to local conversion from the mavros home (convert)</description>
   <maintainer email="colinc131@gmail.com">Colin Rousseau</maintainer>
   <license>Apache-2.0</license>
 
@@ -13,7 +13,6 @@
   <depend>mavros_msgs</depend>
   <depend>custom_interfaces</depend>
   <depend>tools</depend>
-  <exec_depend>python3-geopy</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

@@ -12,7 +12,6 @@ class MissionInit(Node):
     def __init__(self):
         super().__init__('mission_init')
 
-        
         self.ready = False
         self.internal_ok = False
         self.external_ok = False
@@ -45,10 +44,11 @@ class MissionInit(Node):
                 self.destroy_timer(self.setup_timer) 
                 return  
             
+            # LOCAL_POSITION_NED (32)
             request = MessageInterval.Request()  
             request.message_id = 32  
             request.message_rate = self.odom_rate
-
+             # GLOBAL_POSITION_NED (33)
             request2 = MessageInterval.Request()  
             request2.message_id = 33  
             request2.message_rate = self.odom_rate

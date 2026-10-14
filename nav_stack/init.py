@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Init node: raises the MAVLink stream rates, publishes the takeoff point, then takes off on GO.
+"""Init node: raises the MAVLink stream rates, then takes off on GO.
 
 Arming and GUIDED mode stay with the pilot: on GO the node only sends the takeoff command, and
 reports the outcome on topics.TAKEOFF_COMPLETED (True once at altitude, False if refused).
+The takeoff point is the autopilot home, set at arming: convert reads it from mavros.
 
 Parameters (config/<mission>.yaml): takeoff_alt (m above home, required), stream_rate_hz.
 """
@@ -14,12 +15,10 @@ from rclpy.qos import QoSDurabilityPolicy, QoSProfile, qos_profile_sensor_data
 
 from std_msgs.msg import Bool, Float64
 from mavros_msgs.srv import CommandTOL, MessageInterval
-from sensor_msgs.msg import NavSatFix
 
 from tools import topics
 
 # mavros, package tiers : ses noms restent ici (ARCHITECTURE.md, règles de code)
-MAVROS_GLOBAL_POSITION = '/mavros/global_position/global'
 MAVROS_REL_ALT = '/mavros/global_position/rel_alt'
 MAVROS_TAKEOFF = '/mavros/cmd/takeoff'
 MAVROS_SET_MESSAGE_INTERVAL = '/mavros/set_message_interval'
@@ -33,7 +32,7 @@ STREAMED_MESSAGES = (MAVLINK_GLOBAL_POSITION_INT, MAVLINK_LOCAL_POSITION_NED, MA
 MAV_RESULT_FAILED = 4   # CommandTOL result: not armed in GUIDED, or already flying
 TAKEOFF_ALT_TOLERANCE_M = 2.0
 
-# Latched: a node started late (convert, the mission) still gets the last value
+# Latched: a node started late (the mission) still gets the last value
 LATCHED = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
 
 
@@ -46,25 +45,21 @@ class MissionInit(Node):
         self.takeoff_alt = self.get_parameter('takeoff_alt').value
         self.stream_rate = self.get_parameter('stream_rate_hz').value
 
-        self.fix = None   # last NavSatFix with a position
         self.takeoff_requested = False
         self.successful_stream_requests = 0
 
         self.takeoff_client = self.create_client(CommandTOL, MAVROS_TAKEOFF)
         self.msg_interval_client = self.create_client(MessageInterval, MAVROS_SET_MESSAGE_INTERVAL)
 
-        self.takeoff_point_pub = self.create_publisher(NavSatFix, topics.TAKEOFF_POINT, LATCHED)
         self.takeoff_completed_pub = self.create_publisher(Bool, topics.TAKEOFF_COMPLETED, LATCHED)
 
-        self.gps_sub = self.create_subscription(
-            NavSatFix, MAVROS_GLOBAL_POSITION, self.callback_gps, qos_profile_sensor_data)
         self.go_sub = self.create_subscription(Bool, topics.MISSION_GO, self.callback_go, 10)
         self.rel_alt_sub = None   # created once the takeoff is accepted
 
         # Waits for mavros without blocking, then cancels itself
         self.stream_timer = self.create_timer(1.0, self.request_stream_rates)
 
-        self.get_logger().info('Node init prête, en attente du GPS puis du GO.')
+        self.get_logger().info('Node init prête, en attente du GO.')
 
     def request_stream_rates(self):
         if not self.msg_interval_client.service_is_ready():
@@ -89,31 +84,11 @@ class MissionInit(Node):
             self.get_logger().warn('Réglage de fréquence MAVLink refusé, nouvel essai')
             self.stream_timer.reset()
 
-    def callback_gps(self, msg):
-        # global is the EKF output (GLOBAL_POSITION_INT): zero until the EKF has an origin. Its
-        # status field comes from GPS_RAW_INT, often not streamed on the mavros link: not reliable.
-        if msg.latitude == 0.0 and msg.longitude == 0.0:
-            return
-        first_fix = self.fix is None
-        self.fix = msg
-        # The first fix gives convert an origin even if the pilot takes off by hand, without GO
-        if first_fix:
-            self.publish_takeoff_point()
-
     def callback_go(self, msg):
         if not msg.data or self.takeoff_requested:
             return
-        if self.fix is None:
-            self.get_logger().warn('GO reçu sans position GPS : ignoré.')
-            return
         self.get_logger().info('GO reçu : décollage.')
-        self.publish_takeoff_point()   # the origin is where the drone stands at GO
         self.send_takeoff_command()
-
-    def publish_takeoff_point(self):
-        self.takeoff_point_pub.publish(self.fix)
-        self.get_logger().info(
-            f'Point de décollage : lat={self.fix.latitude:.7f}, lon={self.fix.longitude:.7f}')
 
     def send_takeoff_command(self):
         if not self.takeoff_client.service_is_ready():
@@ -149,7 +124,6 @@ class MissionInit(Node):
         if msg.data < self.takeoff_alt - TAKEOFF_ALT_TOLERANCE_M:
             return
         self.destroy_subscription(self.rel_alt_sub)
-        self.destroy_subscription(self.gps_sub)
         self.takeoff_completed_pub.publish(Bool(data=True))
         self.get_logger().info(f'Décollage terminé à {msg.data:.1f} m.')
 
