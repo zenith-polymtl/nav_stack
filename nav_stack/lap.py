@@ -1,64 +1,55 @@
 #!/usr/bin/env python3
-"""Lap node: flies the Task 1 laps by streaming GUIDED setpoints (position + velocity + acceleration).
+"""Lap node: flies the Task 1 laps by streaming GUIDED setpoints (position + velocity + acceleration),
+and avoids the competition traffic with a local planner.
 
-The trajectory is precomputed offline (context_research/research/laps_bench/export_reference.py)
-and read from a CSV file: comment lines `# key: value` (metadata, among them origin_lat/origin_lon,
-the home the plan was computed for), then the header `s,north,east,vn,ve,an,ae,alt,vz`: curvilinear
-abscissa, position north/east in meters from the planned home, velocity and acceleration north/east,
-height above home, vertical speed (positive up). The reference starts at rest at home and ends at
-rest inside the search area.
-
-Frames: /mavros/local_position/pose and /mavros/setpoint_raw/local are ENU (x east, y north, z up)
-from the EKF origin. The reference is anchored like convert does: the home position in that local
-frame (/mavros/home_position/home), plus the flat-earth offset between the actual home and the
-planned one (zero when the plan was computed for this home), plus north/east swapped to x/y. The
-setpoint uses FRAME_LOCAL_NED: mavros converts position, velocity and acceleration ENU -> NED.
+Reference: precomputed offline (context_research/research/laps_bench/export_reference.py), a CSV
+file: comment lines `# key: value` (among them origin_lat/origin_lon, the home the plan was computed
+for), then the header `s,north,east,vn,ve,an,ae,alt,vz`: curvilinear abscissa, position north/east
+in meters from the planned home, velocity and acceleration north/east, height above home, vertical
+speed (up). It starts at rest at home and ends at rest inside the search area. It is anchored in the
+mavros local frame (ENU, from the EKF origin) like convert does: the home position in that frame,
+plus the flat-earth offset from the actual home to the planned one. The setpoint goes out in
+FRAME_LOCAL_NED: mavros converts it from ENU.
 
 Tracking: the reference is indexed by progression, not by time. On each local pose (stream_rate_hz
-of init) the node projects the drone on the reference, inside a window that starts at the current
-progression and extends by at most 1.5 x v x dt + 2 m: the progression never goes back and never
-jumps over a hairpin apex, even with the drone off the line. No lookahead: the setpoint is the
-reference at the drone's own progression, so the planned speed is the flown speed (a 0.1 s
-lookahead flew 10 % faster than the plan in SITL). With latency_compensation, the measured position
-is extrapolated by the measured velocity over the pose age plus uplink_delay_s, so that the setpoint
-matches where the drone is when the autopilot receives it.
+of init), the progression moves to the projection of the drone on the reference, inside a window of
+1.5 x v x dt + 2 m: it never goes back and never jumps over a hairpin apex, even with the drone off
+the line. The setpoint is the reference at that progression, without lookahead, so the planned
+speed is the flown speed. With latency_compensation, the projected position is the measured one
+extrapolated by the measured velocity over the pose age plus uplink_delay_s: where the drone is
+when the autopilot receives the setpoint.
 
-Start and modes: the node never arms and never changes mode (the pilot does). It starts once
-topics.TAKEOFF_COMPLETED is True (init) and /mavros/state reports GUIDED and armed. If the pilot
-leaves GUIDED (or the vehicle disarms), the node stops sending and logs it. When the pilot puts
-GUIDED back, it resumes at the current progression: the progression catches up with the drone
-along the reference, within the same per-tick window, so it cannot skip a waypoint.
+Modes: the node never arms and never changes mode. It starts once topics.TAKEOFF_COMPLETED is True
+(init) and the vehicle is armed in GUIDED. If the pilot leaves GUIDED or disarms, it stops sending;
+back in GUIDED, it resumes at the current progression, which catches up with the drone through the
+same window, so no waypoint is skipped.
 
-Tracking guard: if the drone is more than max_tracking_error_m from the setpoint, the node sends the
-position alone (no velocity, no acceleration) until it is back. Found in SITL: when the progression
-stops while a velocity feedforward keeps going out, ArduPilot follows the feedforward (it bounds the
-position correction) and the drone flies away in a straight line at full speed.
+Tracking guard: beyond max_tracking_error_m from the setpoint, the node sends the position alone.
+Otherwise a velocity feedforward that the position no longer justifies (a frozen progression) sends
+the drone away in a straight line: ArduPilot bounds the position correction, not the feedforward.
+The feedforward comes back once the drone is within TRACKING_RESTORE_M of the setpoint and the
+progression has moved since the loss; without this hysteresis the guard oscillates.
+test_freeze_progress_m (bench only, 0 = off, settable at run time) freezes the progression at that
+abscissa to trigger the guard in SITL (laps_bench/ros_test).
 
-Test only: the parameter test_freeze_progress_m (0 = off, the default; settable at run time with
-`ros2 param set /lap test_freeze_progress_m <m>`) stops the progression at that abscissa, to trigger
-the tracking guard in SITL (context_research/research/laps_bench/ros_test). Never set in flight.
-
-End: when the progression reaches the end of the reference (inside the search area, at rest), the
-node sends the final point with zero velocity for HOLD_TICKS poses (the autopilot keeps holding it:
-a position target does not time out), publishes topics.LAPS_COMPLETED (True, latched), then stays
+End: at the end of the reference, the node holds the final point at zero velocity for HOLD_TICKS
+poses (a position target does not time out), publishes topics.LAPS_COMPLETED (latched), then stays
 silent so that the next node can take over in GUIDED.
 
-Deconfliction hook (the logic lives in other nodes), three inputs, neutral by default:
-- topics.DECONFLICTION_CORRECTION (Vector3, ENU m/s, z ignored): the predictive repulsion of the
-  deconfliction node (nav_stack/deconfliction.py, pf_pred of laps_bench/deconfliction.py), which
-  publishes it on every pose, zero when nothing threatens. Added to the velocity feedforward, and the
-  position is shifted by correction x correction_lead_s so that position and velocity agree. Its
-  change is limited to correction_accel_mps2, and it decays to zero when no message arrived for
-  correction_timeout_s (deconfliction node down): a frozen correction must never keep pushing the drone.
-- topics.LAP_SPEED_FACTOR (Float64, 0 to 1) scales the speed along the line; time scaling gives
-  velocity k v and acceleration k^2 a + k' v. k changes no faster than speed_factor_accel_mps2
-  allows at the current reference speed (|k'| v <= that acceleration).
-- topics.LAP_OFFSET (Vector3: x to the right of the direction of travel, z up, in meters, y
-  ignored) shifts the setpoint, rate limited by offset_rate_mps. The last value is kept.
+Traffic avoidance: from topics.TRAFFIC (comp_client; sim_mocks traffic_mock in simulation). Every
+replan_s, if an aircraft threatens (its predicted path within threat_range_m of the drone or of the
+line ahead, in vertical overlap with the drone's predicted altitude), local_planner plans the next
+10 s: follow the line, stay inside the flight boundary, pass the next waypoint, stay out of the
+predicted keep-away circles by margin_hard_m (almost hard) or margin_soft_m (preferred). The node
+flies that plan horizontally (altitude still from the reference) until no aircraft threatens; when a
+replan fails, it keeps the previous plan while it covers the present, else the reference. Without
+boundary.* and task1.course.* in the site file, avoidance is off. `ros2 param set /lap avoidance
+false` switches it off from the ground. Why each choice: laps_navigation_sitl_research.md §5, §6.
 
 Parameters (config/<mission>.yaml): reference_file (required, absolute path), latency_compensation,
-uplink_delay_s, max_start_distance_m, speed_factor_accel_mps2, offset_rate_mps, correction_lead_s,
-correction_accel_mps2, correction_timeout_s, max_tracking_error_m; test_freeze_progress_m (test only).
+uplink_delay_s, max_start_distance_m, max_tracking_error_m, avoidance, replan_s, threat_range_m,
+margin_hard_m, margin_soft_m, test_freeze_progress_m. From the site file (config/sites/<site>.yaml):
+boundary.lat/lon, task1.course.lat/lon, task1.course.laps.
 """
 import math
 
@@ -66,16 +57,20 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.exceptions import ParameterUninitializedException
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from rclpy.time import Time
 
-from geometry_msgs.msg import PoseStamped, TwistStamped, Vector3
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import HomePosition, PositionTarget, State
-from std_msgs.msg import Bool, Float64
+from std_msgs.msg import Bool
 
+from custom_interfaces.msg import TrafficArray
 from tools import topics
+
+from nav_stack import local_planner, traffic
 
 # mavros, package tiers : ses noms restent ici (ARCHITECTURE.md, règles de code)
 MAVROS_POSE = '/mavros/local_position/pose'
@@ -87,6 +82,8 @@ MAVROS_SETPOINT = '/mavros/setpoint_raw/local'
 GUIDED = 'GUIDED'
 LOCAL_FRAME = 'map'   # mavros local frame
 COLUMNS = ('s', 'north', 'east', 'vn', 've', 'an', 'ae', 'alt', 'vz')
+# The reference in the local frame (ENU): its columns, from the CSV ones
+LOCAL_COLUMNS = [COLUMNS.index(c) for c in ('east', 'north', 'alt', 've', 'vn', 'vz', 'ae', 'an')]
 
 # Position, velocity and acceleration; yaw left to the autopilot (faces the direction of travel)
 TYPE_MASK = PositionTarget.IGNORE_YAW | PositionTarget.IGNORE_YAW_RATE
@@ -101,13 +98,30 @@ MAX_EXTRAPOLATION_S = 0.3    # latency compensation never extrapolates further
 END_DISTANCE_M = 1.0         # progression this close to the end: laps done
 HOLD_TICKS = 10              # final setpoint repeated (0.5 s at 20 Hz) against a lost message
 HOME_MISMATCH_WARN_M = 2.0
+TRACKING_RESTORE_M = 8.0     # tracking guard: feedforward back below this error...
+RESTORE_PROGRESS_M = 1.0     # ...once the progression has moved this much since the loss
+GATE_REACHED_M = 10.0        # a waypoint counts as passed within this distance (the rules: 10 m)
+GATE_GIVE_UP_M = 30.0        # progression this far past a waypoint apex: it is left behind (logged)
+GATE_SEARCH_M = 60.0         # gates: the reference passes a waypoint within this...
+GATE_PASS_LENGTH_M = 200.0   # ...and its nearest point within this much reference after the approach
+MAX_OBSTACLES = 4            # nearest threatening aircraft given to the planner
+VERTICAL_MARGIN_M = 3.0      # an aircraft counts if |altitude difference| <= its vka + this
 
-# ArduPilot LATLON_TO_M (AP_Math/definitions.h), per degree, the same formula as convert
+# ArduPilot LATLON_TO_M (AP_Math/definitions.h), per degree: the same flat-earth formula as convert
 METERS_PER_DEGREE = 0.011131884502145034 * 1e7
 
 # Latched: a node started late (the mission) still gets the last value
 LATCHED = QoSProfile(depth=1, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
 STATE_QOS = QoSProfile(depth=10, durability=QoSDurabilityPolicy.TRANSIENT_LOCAL)
+
+RUNTIME_PARAMETERS = ('avoidance', 'test_freeze_progress_m')
+
+
+def to_local(lat, lon, home):
+    """lat/lon -> mavros local frame (x east, y north), from the mavros home (as convert does)."""
+    north = (lat - home.geo.latitude) * METERS_PER_DEGREE
+    east = (lon - home.geo.longitude) * METERS_PER_DEGREE * math.cos(math.radians((lat + home.geo.latitude) / 2))
+    return np.array([home.position.x + east, home.position.y + north])
 
 
 def load_reference(path):
@@ -133,6 +147,23 @@ def load_reference(path):
     return meta, data
 
 
+def waypoint_gates(s, xy, waypoints):
+    """(progression of the apex, waypoint) for each waypoint in order: the nearest point of the
+    reference on its first pass near the waypoint after the previous one (a lap later, the
+    reference passes there again)."""
+    gates, k0 = [], 0
+    for wp in waypoints:
+        d = np.hypot(*(xy[k0:] - wp).T)
+        near = np.flatnonzero(d < GATE_SEARCH_M)
+        stop = len(d)
+        if len(near):
+            stop = int(np.searchsorted(s[k0:], s[k0 + near[0]] + GATE_PASS_LENGTH_M))
+        k = k0 + int(np.argmin(d[:max(stop, 1)]))
+        gates.append((float(s[k]), wp))
+        k0 = k + 1
+    return gates
+
+
 class Lap(Node):
     def __init__(self):
         super().__init__('lap')
@@ -141,26 +172,29 @@ class Lap(Node):
         self.declare_parameter('latency_compensation', True)
         self.declare_parameter('uplink_delay_s', 0.02)
         self.declare_parameter('max_start_distance_m', 15.0)
-        self.declare_parameter('speed_factor_accel_mps2', 4.0)
-        self.declare_parameter('offset_rate_mps', 2.0)
-        self.declare_parameter('correction_lead_s', 1.0)
-        self.declare_parameter('correction_accel_mps2', 6.0)
-        self.declare_parameter('correction_timeout_s', 1.5)
         self.declare_parameter('max_tracking_error_m', 25.0)
+        self.declare_parameter('avoidance', True)
+        self.declare_parameter('replan_s', 0.25)
+        self.declare_parameter('threat_range_m', 120.0)
+        self.declare_parameter('margin_hard_m', 4.0)
+        self.declare_parameter('margin_soft_m', 15.0)
         self.declare_parameter('test_freeze_progress_m', 0.0)
+        for name in ('boundary.lat', 'boundary.lon', 'task1.course.lat', 'task1.course.lon'):
+            self.declare_parameter(name, Parameter.Type.DOUBLE_ARRAY)   # from the site file
+        self.declare_parameter('task1.course.laps', Parameter.Type.INTEGER)
         reference_file = self.get_parameter('reference_file').value
         self.latency_compensation = self.get_parameter('latency_compensation').value
         self.uplink_delay = self.get_parameter('uplink_delay_s').value
         self.max_start_distance = self.get_parameter('max_start_distance_m').value
-        self.speed_factor_accel = self.get_parameter('speed_factor_accel_mps2').value
-        self.offset_rate = self.get_parameter('offset_rate_mps').value
-        self.correction_lead = self.get_parameter('correction_lead_s').value
-        self.correction_accel = self.get_parameter('correction_accel_mps2').value
-        self.correction_timeout = self.get_parameter('correction_timeout_s').value
         self.max_tracking_error = self.get_parameter('max_tracking_error_m').value
-        self.tracking_lost = False
+        self.avoidance = self.get_parameter('avoidance').value
+        self.replan_s = self.get_parameter('replan_s').value
+        self.threat_range = self.get_parameter('threat_range_m').value
+        self.margin_hard = self.get_parameter('margin_hard_m').value
+        self.margin_soft = self.get_parameter('margin_soft_m').value
         self.freeze_at = 0.0
         self.set_freeze(self.get_parameter('test_freeze_progress_m').value)
+        self.site = self.read_site()
         self.add_on_set_parameters_callback(self.callback_parameters)
 
         try:
@@ -169,7 +203,7 @@ class Lap(Node):
             self.get_logger().error(f'Référence {reference_file} illisible : {e}')
             raise
         self.s = self.ref[:, 0]
-        self.local = None   # reference in the mavros local frame (ENU), set at the start
+        self.local = None   # the reference in the mavros local frame, columns LOCAL_COLUMNS, set at the start
 
         # Autopilot and mission state
         self.home = None
@@ -185,17 +219,19 @@ class Lap(Node):
         self.s_prog = 0.0
         self.last_stamp = None
         self.hold_ticks_left = HOLD_TICKS
+        self.tracking_lost = False
+        self.s_at_loss = 0.0
 
-        # Deconfliction: commands (topics) and the rate-limited values applied
-        self.speed_factor_cmd = 1.0
-        self.speed_factor = 1.0
-        self.offset_cmd = np.zeros(2)   # right of travel, up
-        self.offset = np.zeros(2)
-        self.speed_factor_rate_now = 0.0   # dk/dt, for the acceleration feedforward
-        self.offset_rate_now = np.zeros(2)
-        self.correction_cmd = np.zeros(2)   # ENU m/s, as received
-        self.correction_stamp = None        # node clock time of the last correction message
-        self.correction = np.zeros(2)       # applied, rate limited
+        # Traffic avoidance (set up at the start, once the reference is anchored)
+        self.tracks = {}                # aircraft index -> traffic.Track
+        self.planner = None             # local_planner.LocalPlanner
+        self.gates = []                 # (progression of the apex, waypoint xy), in course order
+        self.gate_next = 0              # index of the next waypoint to pass
+        self.plan = None                # local_planner.Plan being flown, or None
+        self.last_replan = -math.inf    # s, node clock
+        self.avoiding = False
+        self.fail_streak = 0            # failed replans in a row (logs)
+        self.warned_traffic_no_home = False
 
         self.setpoint_pub = self.create_publisher(PositionTarget, MAVROS_SETPOINT, qos_profile_sensor_data)
         self.completed_pub = self.create_publisher(Bool, topics.LAPS_COMPLETED, LATCHED)
@@ -205,9 +241,7 @@ class Lap(Node):
         self.create_subscription(Bool, topics.TAKEOFF_COMPLETED, self.callback_takeoff, LATCHED)
         self.create_subscription(TwistStamped, MAVROS_VELOCITY, self.callback_velocity, qos_profile_sensor_data)
         self.create_subscription(PoseStamped, MAVROS_POSE, self.callback_pose, qos_profile_sensor_data)
-        self.create_subscription(Float64, topics.LAP_SPEED_FACTOR, self.callback_speed_factor, 10)
-        self.create_subscription(Vector3, topics.LAP_OFFSET, self.callback_offset, 10)
-        self.create_subscription(Vector3, topics.DECONFLICTION_CORRECTION, self.callback_correction, 10)
+        self.create_subscription(TrafficArray, topics.TRAFFIC, self.callback_traffic, 10)
 
         self.get_logger().info(
             f"Node lap prête : référence {reference_file} ({self.meta.get('kind', '?')}, "
@@ -237,64 +271,64 @@ class Lap(Node):
         v = msg.twist.linear
         self.velocity = np.array([v.x, v.y, v.z])
 
-    def callback_speed_factor(self, msg):
-        k = min(max(msg.data, 0.0), 1.0)
-        if k != msg.data:
-            self.get_logger().warn(f'Facteur de vitesse {msg.data} hors de [0, 1] : ramené à {k}.')
-        self.speed_factor_cmd = k
-
-    def callback_offset(self, msg):
-        self.offset_cmd = np.array([msg.x, msg.z])
-
-    def callback_correction(self, msg):
-        self.correction_cmd = np.array([msg.x, msg.y])
-        self.correction_stamp = self.get_clock().now()
+    def callback_traffic(self, msg):
+        """Keeps the last updates of each aircraft, in the local frame."""
+        if self.home is None:
+            if not self.warned_traffic_no_home:
+                self.warned_traffic_no_home = True
+                self.get_logger().warn('Trafic reçu avant le home de mavros : ignoré tant que le home manque.')
+            return
+        now = self.now_s()
+        for a in msg.aircraft:
+            stamp = Time.from_msg(a.stamp).nanoseconds * 1e-9 if (a.stamp.sec or a.stamp.nanosec) else now
+            track = self.tracks.get(a.index)
+            if track is None or track.name != a.name:
+                track = self.tracks[a.index] = traffic.Track(a.name)
+                self.get_logger().info(
+                    f'Trafic : {a.name} (#{a.index}), keep-away {a.horizontal_keep_away:.0f} m, '
+                    f'{a.altitude_agl:.0f} m AGL.')
+            track.add(traffic.Update(stamp, to_local(a.latitude, a.longitude, self.home), a.altitude_agl,
+                                     a.speed, a.course_deg, a.horizontal_keep_away, a.vertical_keep_away))
 
     def callback_parameters(self, params):
-        """Only test_freeze_progress_m changes at run time (test of the tracking guard)."""
+        """At run time, only avoidance (from the ground) and test_freeze_progress_m (bench) change."""
+        if any(p.name not in RUNTIME_PARAMETERS for p in params):
+            return SetParametersResult(successful=False,
+                                       reason='seuls avoidance et test_freeze_progress_m se changent en vol')
         for p in params:
-            if p.name != 'test_freeze_progress_m':
-                return SetParametersResult(successful=False, reason='seul test_freeze_progress_m se change en vol')
-        for p in params:
-            self.set_freeze(p.value)
+            if p.name == 'avoidance':
+                self.avoidance = bool(p.value)
+                if not self.avoidance and self.planner is not None:
+                    self.stop_avoiding()
+                self.get_logger().warn(f'Évitement du trafic {"activé" if self.avoidance else "coupé"} (paramètre avoidance).')
+            else:
+                self.set_freeze(p.value)
         return SetParametersResult(successful=True)
 
     def set_freeze(self, value):
         was_frozen = self.freeze_at > 0.0
-        self.freeze_at = float(value or 0.0)
+        self.freeze_at = float(value)
         if self.freeze_at > 0.0:
             self.get_logger().warn(
                 f'TEST : progression figée à {self.freeze_at:.0f} m (test_freeze_progress_m). Jamais en vol.')
         elif was_frozen:
             self.get_logger().warn('TEST : progression libérée (test_freeze_progress_m = 0).')
 
-    # ------------------------------------------------------------------ start, pause, resume
-    def anchor_reference(self):
-        """Reference in the mavros local frame: home + (planned home - actual home) + north/east."""
-        home = self.home
-        shift_n = shift_e = 0.0
-        if 'origin_lat' in self.meta and 'origin_lon' in self.meta:
-            lat0, lon0 = float(self.meta['origin_lat']), float(self.meta['origin_lon'])
-            lat, lon = home.geo.latitude, home.geo.longitude
-            shift_n = (lat0 - lat) * METERS_PER_DEGREE
-            shift_e = (lon0 - lon) * METERS_PER_DEGREE * math.cos(math.radians((lat0 + lat) / 2))
-            gap = math.hypot(shift_n, shift_e)
-            if gap > HOME_MISMATCH_WARN_M:
+    def read_site(self):
+        """Flight boundary and course from the site file, or None (avoidance then off)."""
+        try:
+            get = lambda name: self.get_parameter(name).value   # noqa: E731
+            return dict(boundary=list(zip(get('boundary.lat'), get('boundary.lon'))),
+                        course=list(zip(get('task1.course.lat'), get('task1.course.lon'))),
+                        laps=get('task1.course.laps'))
+        except ParameterUninitializedException:
+            if self.avoidance:
                 self.get_logger().warn(
-                    f'Le home est à {gap:.1f} m de celui du plan : la référence reste sur ses points GPS, '
-                    'le début du tracé est décalé du drone d\'autant.')
-        r = self.ref
-        local = np.empty((len(r), 8))
-        local[:, 0] = home.position.x + shift_e + r[:, 2]   # x east
-        local[:, 1] = home.position.y + shift_n + r[:, 1]   # y north
-        local[:, 2] = home.position.z + r[:, 7]             # z up, height above home
-        local[:, 3] = r[:, 4]                                # vx = v east
-        local[:, 4] = r[:, 3]                                # vy = v north
-        local[:, 5] = r[:, 8]                                # vz up
-        local[:, 6] = r[:, 6]                                # ax = a east
-        local[:, 7] = r[:, 5]                                # ay = a north
-        return local
+                    'Pas de limite de vol ni de parcours dans le fichier du site (boundary.*, task1.course.*) : '
+                    'évitement du trafic désactivé.')
+            return None
 
+    # ------------------------------------------------------------------ start
     def ready_to_fly(self):
         return self.takeoff_done and self.home is not None and self.mode == GUIDED and self.armed
 
@@ -309,8 +343,41 @@ class Lap(Node):
             return False
         self.local = local
         self.started = True
+        self.setup_avoidance()
         self.get_logger().info(f'Départ des tours : drone à {distance:.1f} m du début de la référence.')
         return True
+
+    def anchor_reference(self):
+        """The reference in the mavros local frame: the planned home at its GPS position, north/east
+        as y/x."""
+        home = self.home
+        origin = np.array([home.position.x, home.position.y])
+        if 'origin_lat' in self.meta and 'origin_lon' in self.meta:
+            planned = to_local(float(self.meta['origin_lat']), float(self.meta['origin_lon']), home)
+            gap = float(np.hypot(*(planned - origin)))
+            if gap > HOME_MISMATCH_WARN_M:
+                self.get_logger().warn(
+                    f'Le home est à {gap:.1f} m de celui du plan : la référence reste sur ses points GPS, '
+                    'le début du tracé est décalé du drone d\'autant.')
+            origin = planned
+        local = self.ref[:, LOCAL_COLUMNS]
+        local[:, 0] += origin[0]
+        local[:, 1] += origin[1]
+        local[:, 2] += home.position.z
+        return local
+
+    def setup_avoidance(self):
+        """Planner, boundary and waypoints in the local frame, once the reference is anchored."""
+        if self.site is None:
+            return
+        boundary = [to_local(lat, lon, self.home) for lat, lon in self.site['boundary']]
+        reference = local_planner.Reference(self.s, self.local[:, 0:2], self.local[:, 3:5])
+        self.planner = local_planner.LocalPlanner(reference, boundary, self.margin_hard, self.margin_soft)
+        # the waypoints to pass, in order: each lap, then back to the first one before the zone
+        course = [to_local(lat, lon, self.home) for lat, lon in self.site['course']]
+        self.gates = waypoint_gates(self.s, self.local[:, 0:2], course * self.site['laps'] + course[:1])
+        self.get_logger().info(
+            f'Évitement du trafic prêt : {len(boundary)} sommets de limite, {len(self.gates)} passages de WP.')
 
     # ------------------------------------------------------------------ the loop, on each pose
     def callback_pose(self, msg):
@@ -325,8 +392,8 @@ class Lap(Node):
             return
 
         p = msg.pose.position
-        position = np.array([p.x, p.y, p.z])
-        if not self.started and not self.start(position):
+        measured = np.array([p.x, p.y, p.z])
+        if not self.started and not self.start(measured):
             return
         if not self.flying:
             self.flying = True
@@ -338,42 +405,32 @@ class Lap(Node):
         dt = NOMINAL_DT if self.last_stamp is None else \
             min(max((stamp - self.last_stamp).nanoseconds * 1e-9, 0.0), MAX_DT)
         self.last_stamp = stamp
-
+        position = measured
         if self.latency_compensation:
             age = (self.get_clock().now() - stamp).nanoseconds * 1e-9
-            lead = min(max(age, 0.0) + self.uplink_delay, MAX_EXTRAPOLATION_S)
-            position = position + self.velocity * lead
+            position = measured + self.velocity * min(max(age, 0.0) + self.uplink_delay, MAX_EXTRAPOLATION_S)
 
         self.advance(position[:2], dt)
         if self.s[-1] - self.s_prog < END_DISTANCE_M:
             self.finish()
             return
-        sample = self.sample(self.s_prog)
-        self.update_deconfliction(dt, float(np.hypot(sample[1][0], sample[1][1])))
-        pos, vel, acc = self.deconflicted(sample)
-        error = float(np.linalg.norm(pos[:2] - np.array([p.x, p.y])))
-        if error > self.max_tracking_error:
-            # feedforward coupé : le drone revient sur la consigne au lieu de suivre une vitesse
-            # qui ne correspond plus à sa position (sinon il part en ligne droite)
+        pos, vel, acc = self.sample(self.s_prog)
+        self.update_gates(position[:2])
+        local = self.avoid(position, p.z - self.home.position.z)
+        if local is not None:     # the local plan: horizontal from it, vertical from the line
+            pos[:2], vel[:2], acc[:2] = local
+        if not self.feedforward_allowed(pos[:2], measured[:2]):
             vel, acc = np.zeros(3), np.zeros(3)
-            if not self.tracking_lost:
-                self.get_logger().error(
-                    f'Drone à {error:.0f} m de sa consigne : feedforward coupé, retour en position seule.')
-            self.tracking_lost = True
-        elif self.tracking_lost:
-            self.tracking_lost = False
-            self.get_logger().info('Drone revenu sur sa consigne : feedforward rétabli.')
         self.publish_setpoint(pos, vel, acc)
 
     def advance(self, xy, dt):
         """Moves the progression forward to the projection of xy, inside the per-tick window."""
         i0 = int(np.searchsorted(self.s, self.s_prog, side='right')) - 1
-        speed = max(float(np.hypot(*self.local[i0, 3:5])) * self.speed_factor,
+        speed = max(float(np.hypot(*self.local[i0, 3:5])),
                     float(np.hypot(*self.velocity[:2])), MIN_SPEED_FOR_WINDOW)
         s_max = self.s_prog + ADVANCE_FACTOR * speed * dt + ADVANCE_MARGIN_M
         i1 = min(int(np.searchsorted(self.s, s_max, side='right')), len(self.s) - 1)
-        pts = self.local[i0:i1 + 1, :2]
-        k = i0 + int(np.argmin(np.hypot(*(pts - xy).T)))
+        k = i0 + int(np.argmin(np.hypot(*(self.local[i0:i1 + 1, :2] - xy).T)))
         # projection on the segments around the nearest point, for a continuous progression
         best_d, best_s = math.inf, self.s[k]
         for a in (k - 1, k):
@@ -387,57 +444,108 @@ class Lap(Node):
                 best_d, best_s = d, self.s[a] + u * (self.s[a + 1] - self.s[a])
         self.s_prog = min(max(self.s_prog, best_s), s_max, self.s[-1])
         if self.freeze_at > 0.0:
-            self.s_prog = min(self.s_prog, self.freeze_at)   # test only, see the module docstring
+            self.s_prog = min(self.s_prog, self.freeze_at)   # bench only, see the module docstring
 
     def sample(self, s):
         """Reference at abscissa s, linear interpolation: (pos xyz, vel xyz, acc xyz), ENU."""
         i = min(int(np.searchsorted(self.s, s, side='right')) - 1, len(self.s) - 2)
         f = (s - self.s[i]) / (self.s[i + 1] - self.s[i])
         row = (1.0 - f) * self.local[i] + f * self.local[i + 1]
-        pos = row[0:3]
-        vel = row[3:6]
-        acc = np.array([row[6], row[7], 0.0])
-        return pos, vel, acc
+        return row[0:3], row[3:6], np.array([row[6], row[7], 0.0])
 
-    # ------------------------------------------------------------------ deconfliction hook
-    def update_deconfliction(self, dt, v_ref):
-        """Rate-limits the commanded speed factor, offset and velocity correction; keeps the rates
-        of the first two for the feedforward."""
-        step = self.speed_factor_accel / max(v_ref, 1.0) * dt
-        k = self.speed_factor + min(max(self.speed_factor_cmd - self.speed_factor, -step), step)
-        self.speed_factor_rate_now = (k - self.speed_factor) / dt if dt > 0 else 0.0
-        self.speed_factor = k
-        step = self.offset_rate * dt
-        offset = self.offset + np.clip(self.offset_cmd - self.offset, -step, step)
-        self.offset_rate_now = (offset - self.offset) / dt if dt > 0 else np.zeros(2)
-        self.offset = offset
-        target = self.correction_cmd
-        if self.correction_stamp is None or \
-                (self.get_clock().now() - self.correction_stamp).nanoseconds * 1e-9 > self.correction_timeout:
-            target = np.zeros(2)            # silence of the deconfliction node: back to the line
-        delta = target - self.correction
-        step = self.correction_accel * dt
-        norm = float(np.hypot(*delta))
-        self.correction = self.correction + (delta if norm <= step else delta * (step / norm))
+    def feedforward_allowed(self, setpoint_xy, measured_xy):
+        """Tracking guard, with its hysteresis: False while the drone is lost from its setpoint."""
+        error = float(np.linalg.norm(setpoint_xy - measured_xy))
+        if not self.tracking_lost and error > self.max_tracking_error:
+            self.tracking_lost = True
+            self.s_at_loss = self.s_prog
+            self.get_logger().error(
+                f'Drone à {error:.0f} m de sa consigne : feedforward coupé, retour en position seule.')
+        elif (self.tracking_lost and error < TRACKING_RESTORE_M
+              and self.s_prog > self.s_at_loss + RESTORE_PROGRESS_M):
+            self.tracking_lost = False
+            self.get_logger().info('Drone revenu sur sa consigne : feedforward rétabli.')
+        return not self.tracking_lost
 
-    def deconflicted(self, sample):
-        """Applies the speed factor k (time scaling) and the lateral/vertical offset to a sample."""
-        pos, vel, acc = sample
-        k, k_dot = self.speed_factor, self.speed_factor_rate_now
-        new_vel = k * vel
-        new_acc = k * k * acc + k_dot * vel
-        if np.any(self.offset != 0.0) or np.any(self.offset_rate_now != 0.0):
-            speed = float(np.hypot(vel[0], vel[1]))
-            if speed > 0.1:
-                right = np.array([vel[1], -vel[0], 0.0]) / speed   # ENU: right of the direction of travel
-                up = np.array([0.0, 0.0, 1.0])
-                pos = pos + right * self.offset[0] + up * self.offset[1]
-                new_vel = new_vel + right * self.offset_rate_now[0] + up * self.offset_rate_now[1]
-        if np.any(self.correction != 0.0):
-            c = np.array([self.correction[0], self.correction[1], 0.0])
-            pos = pos + c * self.correction_lead
-            new_vel = new_vel + c
-        return pos, new_vel, new_acc
+    # ------------------------------------------------------------------ traffic avoidance
+    def now_s(self):
+        return self.get_clock().now().nanoseconds * 1e-9
+
+    def avoid(self, position, altitude):
+        """The local plan's (pos, vel, acc) at this instant when an aircraft threatens, else None."""
+        if not self.avoidance or self.planner is None or not self.tracks:
+            return None
+        now = self.now_s()
+        if now - self.last_replan >= self.replan_s:
+            self.last_replan = now
+            obstacles = self.threats(now, position[:2], altitude)
+            if not obstacles:
+                self.stop_avoiding()
+                return None
+            if not self.avoiding:
+                self.avoiding = True
+                self.get_logger().info(f'Évitement : {len(obstacles)} avion(s) menace(nt), plans locaux.')
+            self.replan(now, position[:2], obstacles)
+        if self.plan is None or not self.plan.covers(now):
+            return None
+        return self.plan.at(now)
+
+    def replan(self, now, xy, obstacles):
+        gate = self.gates[self.gate_next] if self.gate_next < len(self.gates) else None
+        plan = self.planner.plan(self.s_prog, xy, self.velocity[:2], obstacles, gate, now)
+        if plan is not None:
+            if self.fail_streak > 1:
+                self.get_logger().info(f'Plan local rétabli après {self.fail_streak} échecs de suite.')
+            self.fail_streak = 0
+            self.plan = plan
+            return
+        # une rafale d'échecs : un seul WARN au début (le plan précédent reste valide 9,5 s)
+        self.fail_streak += 1
+        if self.fail_streak == 1:
+            self.get_logger().warn('Plan local raté : le précédent reste en vigueur s\'il est encore valide.')
+
+    def threats(self, now, xy, altitude):
+        """Aircraft whose predicted path comes near the drone or the line ahead, in vertical overlap
+        with the drone's predicted altitude (it may be climbing): the MAX_OBSTACLES nearest."""
+        t = np.arange(local_planner.STEPS + 1) * local_planner.DT
+        altitudes = np.clip(altitude + self.velocity[2] * t, 0.0, None)
+        speed = max(float(np.hypot(*self.velocity[:2])), 1.0)
+        ahead = self.planner.ref.at(self.s_prog + t * speed)[0]
+        found = []
+        for track in self.tracks.values():
+            if track.age(now) > traffic.STALE_S:
+                continue
+            last = track.last
+            if not np.any(np.abs(altitudes - last.altitude) <= last.vka + VERTICAL_MARGIN_M):
+                continue
+            centers = track.predict(now, local_planner.HORIZON_S, local_planner.DT)
+            near = min(float(np.min(np.hypot(*(centers - ahead).T))), float(np.hypot(*(centers[0] - xy))))
+            if near < self.threat_range:
+                found.append((near, local_planner.Obstacle(centers, last.hka)))
+        found.sort(key=lambda f: f[0])
+        return [ob for _, ob in found[:MAX_OBSTACLES]]
+
+    def update_gates(self, xy):
+        """Moves to the next waypoint once this one is passed (within 10 m), or left behind."""
+        while self.gate_next < len(self.gates):
+            s_apex, wp = self.gates[self.gate_next]
+            if np.hypot(*(xy - wp)) <= GATE_REACHED_M:
+                self.gate_next += 1
+            elif self.s_prog > s_apex + GATE_GIVE_UP_M:
+                self.get_logger().error(
+                    f'WP n°{self.gate_next + 1} laissé derrière sans y être passé à moins de {GATE_REACHED_M:.0f} m.')
+                self.gate_next += 1
+            else:
+                break
+
+    def stop_avoiding(self):
+        self.plan = None
+        if self.avoiding:
+            self.avoiding = False
+            times = np.array(self.planner.solve_times) * 1000
+            self.get_logger().info(
+                f'Fin d\'évitement, retour sur la ligne à {self.s_prog:.0f} m. Plans : {len(times)}, '
+                f'{np.median(times):.0f} ms en médiane, {times.max():.0f} ms au pire, {self.planner.failures} ratés.')
 
     # ------------------------------------------------------------------ output
     def publish_setpoint(self, pos, vel, acc):
@@ -453,8 +561,8 @@ class Lap(Node):
         self.setpoint_pub.publish(sp)
 
     def finish(self):
-        """Holds the final point (zero velocity) for HOLD_TICKS poses, then reports and goes silent."""
-        # no deconfliction offset here: the end point is the one planned inside the area
+        """Holds the final point (inside the search area, at rest) for HOLD_TICKS poses, then reports
+        and goes silent."""
         self.publish_setpoint(self.local[-1, 0:3], np.zeros(3), np.zeros(3))
         self.hold_ticks_left -= 1
         if self.hold_ticks_left > 0:
