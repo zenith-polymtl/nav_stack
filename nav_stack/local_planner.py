@@ -13,7 +13,8 @@ The lap node calls it while an aircraft threatens. Each replan optimizes the nex
     hard constraint, and keep-away + margin_soft_m, a mere preference. A single wide hard margin
     can make a waypoint unreachable (an aircraft circling near it), and the drone then waits forever;
   - flight boundary: the polygon edges that face the drone, hard, FENCE_MARGIN_M inside;
-  - next waypoint: within GATE_TOL_M of it at the step where the progression reaches it (hard).
+  - next waypoint: within gate_tol_m (GATE_TOL_M by default) of it at the step where the progression
+    reaches it (hard).
 Quadratic cost, linear and second-order cone constraints: Clarabel (interior point) solves it in
 about 20 iterations, a few ms. If it fails, plan() returns None and the caller keeps its previous
 plan while that one still covers the present, else goes back to the reference.
@@ -39,7 +40,8 @@ V_MAX = 21.0                    # m/s
 A_MAX = G * math.tan(math.radians(30.0))   # 30 deg of lean
 FENCE_MARGIN_M = 25.0
 FENCE_REACH_M = 300.0           # boundary edges farther than this are out of reach within the horizon
-GATE_TOL_M = 9.0                # the rules give 10 m (question for the Q&A): 1 m of margin
+GATE_TOL_M = 9.0                # default gate: the rules give 10 m (question for the Q&A), 1 m of margin;
+                                # lap passes its own (wp_tolerance_m - 1)
 GATE_WINDOW_M = 8.0             # progression within this of the waypoint apex at the gate step
 NU_MAX_FACTOR = 1.15            # progression speed at most this x the reference speed
 # Cost weights
@@ -202,10 +204,11 @@ class _Constraints:
 
 
 class LocalPlanner:
-    def __init__(self, reference, boundary, margin_hard_m, margin_soft_m):
+    def __init__(self, reference, boundary, margin_hard_m, margin_soft_m, gate_tol_m=None):
         self.ref = reference
         self.boundary = np.asarray(boundary, float)
         self.margin_hard, self.margin_soft = margin_hard_m, margin_soft_m
+        self.gate_tol = gate_tol_m       # None: GATE_TOL_M
         self.previous = None     # last Plan: the linearization point of the next one
         self.solve_times = []    # s, for the logs
         self.failures = 0
@@ -228,7 +231,8 @@ class LocalPlanner:
                 c.ge([(_pos(i, 0), n[0]), (_pos(i, 1), n[1])], cn - float(n @ o) + FENCE_MARGIN_M)
         self._avoid(c, obstacles, o, xy_bar, r_bar)
         if gate is not None:
-            self._gate(c, gate[0] - th0, np.asarray(gate[1], float) - o, theta_bar)
+            self._gate(c, gate[0] - th0, np.asarray(gate[1], float) - o, theta_bar,
+                       GATE_TOL_M if self.gate_tol is None else self.gate_tol)
 
         A, b, cones = c.matrices(nx)
         settings = clarabel.DefaultSettings()
@@ -336,10 +340,10 @@ class LocalPlanner:
                 c.ge([(_pos(i, 0), n[0]), (_pos(i, 1), n[1]), (soft, 1.0)], base + self.margin_soft)
 
     @staticmethod
-    def _gate(c, s_apex, wp, theta_bar):
+    def _gate(c, s_apex, wp, theta_bar, tol):
         """The next waypoint, if the nominal progression reaches it within the horizon."""
         if theta_bar[0] <= s_apex <= theta_bar[-1]:
             i = max(int(np.argmin(np.abs(theta_bar - s_apex))), 1)
-            c.norm_le(_pos(i, 0), _pos(i, 1), float(wp[0]), float(wp[1]), GATE_TOL_M)
+            c.norm_le(_pos(i, 0), _pos(i, 1), float(wp[0]), float(wp[1]), tol)
             c.ge([(_theta(i), 1.0)], s_apex - GATE_WINDOW_M)
             c.le([(_theta(i), 1.0)], s_apex + GATE_WINDOW_M)

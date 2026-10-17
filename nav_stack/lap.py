@@ -39,7 +39,8 @@ silent so that the next node can take over in GUIDED.
 Traffic avoidance: from topics.TRAFFIC (comp_client; sim_mocks traffic_mock in simulation). Every
 replan_s, if an aircraft threatens (its predicted path within threat_range_m of the drone or of the
 line ahead, in vertical overlap with the drone's predicted altitude), local_planner plans the next
-10 s: follow the line, stay inside the flight boundary, pass the next waypoint, stay out of the
+10 s: follow the line, stay inside the flight boundary, pass the next waypoint (within
+wp_tolerance_m - 1), stay out of the
 predicted keep-away circles by margin_hard_m (almost hard) or margin_soft_m (preferred). The node
 flies that plan horizontally (altitude still from the reference) until no aircraft threatens; when a
 replan fails, it keeps the previous plan while it covers the present, else the reference. Without
@@ -48,7 +49,8 @@ false` switches it off from the ground. Why each choice: laps_navigation_sitl_re
 
 Parameters (config/<mission>.yaml): reference_file (required, absolute path), latency_compensation,
 uplink_delay_s, max_start_distance_m, max_tracking_error_m, avoidance, replan_s, threat_range_m,
-margin_hard_m, margin_soft_m, test_freeze_progress_m. From the site file (config/sites/<site>.yaml):
+margin_hard_m, margin_soft_m, wp_tolerance_m (a waypoint is passed within it; the planner's gate is
+1 m tighter; the reference must be planned well inside it), test_freeze_progress_m. From the site file (config/sites/<site>.yaml):
 boundary.lat/lon, task1.course.lat/lon, task1.course.laps.
 """
 import math
@@ -100,7 +102,7 @@ HOLD_TICKS = 10              # final setpoint repeated (0.5 s at 20 Hz) against 
 HOME_MISMATCH_WARN_M = 2.0
 TRACKING_RESTORE_M = 8.0     # tracking guard: feedforward back below this error...
 RESTORE_PROGRESS_M = 1.0     # ...once the progression has moved this much since the loss
-GATE_REACHED_M = 10.0        # a waypoint counts as passed within this distance (the rules: 10 m)
+GATE_MARGIN_M = 1.0          # the planner's waypoint gate is wp_tolerance_m minus this
 GATE_GIVE_UP_M = 30.0        # progression this far past a waypoint apex: it is left behind (logged)
 GATE_SEARCH_M = 60.0         # gates: the reference passes a waypoint within this...
 GATE_PASS_LENGTH_M = 200.0   # ...and its nearest point within this much reference after the approach
@@ -178,6 +180,7 @@ class Lap(Node):
         self.declare_parameter('threat_range_m', 120.0)
         self.declare_parameter('margin_hard_m', 4.0)
         self.declare_parameter('margin_soft_m', 15.0)
+        self.declare_parameter('wp_tolerance_m', 10.0)
         self.declare_parameter('test_freeze_progress_m', 0.0)
         for name in ('boundary.lat', 'boundary.lon', 'task1.course.lat', 'task1.course.lon'):
             self.declare_parameter(name, Parameter.Type.DOUBLE_ARRAY)   # from the site file
@@ -192,6 +195,7 @@ class Lap(Node):
         self.threat_range = self.get_parameter('threat_range_m').value
         self.margin_hard = self.get_parameter('margin_hard_m').value
         self.margin_soft = self.get_parameter('margin_soft_m').value
+        self.wp_tolerance = self.get_parameter('wp_tolerance_m').value
         self.freeze_at = 0.0
         self.set_freeze(self.get_parameter('test_freeze_progress_m').value)
         self.site = self.read_site()
@@ -372,7 +376,8 @@ class Lap(Node):
             return
         boundary = [to_local(lat, lon, self.home) for lat, lon in self.site['boundary']]
         reference = local_planner.Reference(self.s, self.local[:, 0:2], self.local[:, 3:5])
-        self.planner = local_planner.LocalPlanner(reference, boundary, self.margin_hard, self.margin_soft)
+        self.planner = local_planner.LocalPlanner(reference, boundary, self.margin_hard, self.margin_soft,
+                                                  self.wp_tolerance - GATE_MARGIN_M)
         # the waypoints to pass, in order: each lap, then back to the first one before the zone
         course = [to_local(lat, lon, self.home) for lat, lon in self.site['course']]
         self.gates = waypoint_gates(self.s, self.local[:, 0:2], course * self.site['laps'] + course[:1])
@@ -526,14 +531,14 @@ class Lap(Node):
         return [ob for _, ob in found[:MAX_OBSTACLES]]
 
     def update_gates(self, xy):
-        """Moves to the next waypoint once this one is passed (within 10 m), or left behind."""
+        """Moves to the next waypoint once this one is passed (within wp_tolerance_m), or left behind."""
         while self.gate_next < len(self.gates):
             s_apex, wp = self.gates[self.gate_next]
-            if np.hypot(*(xy - wp)) <= GATE_REACHED_M:
+            if np.hypot(*(xy - wp)) <= self.wp_tolerance:
                 self.gate_next += 1
             elif self.s_prog > s_apex + GATE_GIVE_UP_M:
                 self.get_logger().error(
-                    f'WP n°{self.gate_next + 1} laissé derrière sans y être passé à moins de {GATE_REACHED_M:.0f} m.')
+                    f'WP n°{self.gate_next + 1} laissé derrière sans y être passé à moins de {self.wp_tolerance:.0f} m.')
                 self.gate_next += 1
             else:
                 break
