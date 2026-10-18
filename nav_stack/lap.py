@@ -47,13 +47,19 @@ replan fails, it keeps the previous plan while it covers the present, else the r
 boundary.* and task1.course.* in the site file, avoidance is off. `ros2 param set /lap avoidance
 false` switches it off from the ground. Why each choice: laps_navigation_sitl_research.md §5, §6.
 
+With time_planning, the lap node first flies the line at the right speed (time_planner.TimeGuide: a
+speed profile along the reference over 60 s, out of the predicted keep-away circles, replanned every
+second in a worker thread), and falls back to local_planner when there is no safe profile (an aircraft
+coming along the line, or circling on it); laps_navigation_sitl_research.md §6.10.
+
 Parameters (config/<mission>.yaml): reference_file (required, absolute path), latency_compensation,
 uplink_delay_s, max_start_distance_m, max_tracking_error_m, avoidance, replan_s, threat_range_m,
 margin_hard_m, margin_soft_m, wp_tolerance_m (a waypoint is passed within it; the planner's gate is
-1 m tighter; the reference must be planned well inside it), test_freeze_progress_m. From the site file (config/sites/<site>.yaml):
+1 m tighter; the reference must be planned well inside it), time_planning, test_freeze_progress_m. From the site file (config/sites/<site>.yaml):
 boundary.lat/lon, task1.course.lat/lon, task1.course.laps.
 """
 import math
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import rclpy
@@ -72,7 +78,7 @@ from std_msgs.msg import Bool
 from custom_interfaces.msg import TrafficArray
 from tools import topics
 
-from nav_stack import local_planner, traffic
+from nav_stack import local_planner, time_planner, traffic
 
 # mavros, package tiers : ses noms restent ici (ARCHITECTURE.md, règles de code)
 MAVROS_POSE = '/mavros/local_position/pose'
@@ -181,6 +187,7 @@ class Lap(Node):
         self.declare_parameter('margin_hard_m', 4.0)
         self.declare_parameter('margin_soft_m', 15.0)
         self.declare_parameter('wp_tolerance_m', 10.0)
+        self.declare_parameter('time_planning', False)
         self.declare_parameter('test_freeze_progress_m', 0.0)
         for name in ('boundary.lat', 'boundary.lon', 'task1.course.lat', 'task1.course.lon'):
             self.declare_parameter(name, Parameter.Type.DOUBLE_ARRAY)   # from the site file
@@ -196,6 +203,7 @@ class Lap(Node):
         self.margin_hard = self.get_parameter('margin_hard_m').value
         self.margin_soft = self.get_parameter('margin_soft_m').value
         self.wp_tolerance = self.get_parameter('wp_tolerance_m').value
+        self.time_planning = self.get_parameter('time_planning').value
         self.freeze_at = 0.0
         self.set_freeze(self.get_parameter('test_freeze_progress_m').value)
         self.site = self.read_site()
@@ -229,6 +237,10 @@ class Lap(Node):
         # Traffic avoidance (set up at the start, once the reference is anchored)
         self.tracks = {}                # aircraft index -> traffic.Track
         self.planner = None             # local_planner.LocalPlanner
+        self.guide = None               # time_planner.TimeGuide (time_planning)
+        self.guide_job = None           # its replan, in a worker thread (up to a few hundred ms)
+        self.guide_pool = ThreadPoolExecutor(max_workers=1)
+        self.guiding = False            # the setpoint comes from the time profile
         self.gates = []                 # (progression of the apex, waypoint xy), in course order
         self.gate_next = 0              # index of the next waypoint to pass
         self.plan = None                # local_planner.Plan being flown, or None
@@ -381,8 +393,12 @@ class Lap(Node):
         # the waypoints to pass, in order: each lap, then back to the first one before the zone
         course = [to_local(lat, lon, self.home) for lat, lon in self.site['course']]
         self.gates = waypoint_gates(self.s, self.local[:, 0:2], course * self.site['laps'] + course[:1])
+        if self.time_planning:
+            self.guide = time_planner.TimeGuide(self.s, self.local[:, 0:2], self.local[:, 3:5], self.local[:, 6:8],
+                                                stale_s=traffic.STALE_S)
+        guide = ", profil de vitesse le long de la ligne d'abord" if self.guide else ''
         self.get_logger().info(
-            f'Évitement du trafic prêt : {len(boundary)} sommets de limite, {len(self.gates)} passages de WP.')
+            f'Évitement du trafic prêt : {len(boundary)} sommets de limite, {len(self.gates)} passages de WP{guide}.')
 
     # ------------------------------------------------------------------ the loop, on each pose
     def callback_pose(self, msg):
@@ -477,10 +493,17 @@ class Lap(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def avoid(self, position, altitude):
-        """The local plan's (pos, vel, acc) at this instant when an aircraft threatens, else None."""
+        """The local plan's (pos, vel, acc) at this instant when an aircraft threatens, else None. With
+        time_planning, the time profile first (time_planner.TimeGuide): the line at the right speed; the
+        local plan when there is no safe profile."""
         if not self.avoidance or self.planner is None or not self.tracks:
             return None
         now = self.now_s()
+        if self.guide is not None:
+            setpoint = self.time_guidance(now, altitude)
+            if setpoint is not None:
+                self.plan = None
+                return setpoint
         if now - self.last_replan >= self.replan_s:
             self.last_replan = now
             obstacles = self.threats(now, position[:2], altitude)
@@ -494,6 +517,24 @@ class Lap(Node):
         if self.plan is None or not self.plan.covers(now):
             return None
         return self.plan.at(now)
+
+    def time_guidance(self, now, altitude):
+        """Starts a replan of the time profile in the worker thread when due (every REPLAN_S, if the
+        previous one is over), and returns the setpoint of the latest profile, or None."""
+        if self.guide_job is None or self.guide_job.done():
+            if self.guide_job is not None and self.guide_job.exception() is not None:
+                self.get_logger().error(f'Profil de vitesse : erreur {self.guide_job.exception()!r}, plan local.')
+                self.guide.profile = None
+            if now - self.guide.last_plan >= time_planner.REPLAN_S:
+                obstacles = self.guide.obstacles(now, list(self.tracks.values()), altitude)
+                self.guide_job = self.guide_pool.submit(self.guide.update, now, self.s_prog, self.velocity[:2].copy(),
+                                                        obstacles)
+        setpoint = self.guide.setpoint(now)
+        if (setpoint is not None) != self.guiding:
+            self.guiding = setpoint is not None
+            self.get_logger().info('Évitement : profil de vitesse le long de la ligne.' if self.guiding else
+                                   f'Évitement : plan local (profil : {self.guide.stats}).')
+        return setpoint
 
     def replan(self, now, xy, obstacles):
         gate = self.gates[self.gate_next] if self.gate_next < len(self.gates) else None
