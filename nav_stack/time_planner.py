@@ -3,8 +3,8 @@
 Why: with waypoints aimed at 5 m, leaving the line costs waypoints; and an aircraft in a holding
 pattern flies a circle that traffic.py predicts exactly, so a free passage is known long in advance.
 On 74 random encounters (laps_navigation_sitl_research.md §6.10), flying the line at the right
-speed, with the local planner as a fallback, touches 18 % of them and leaves 1 waypoint beyond 5 m,
-against 42 % and 17 for the local planner alone with a 4 m gate.
+speed, with the local planner as a fallback, touches 14 % of them and leaves 2 waypoints beyond 5 m,
+against 42 % and 17 for the local planner alone with a 4 m gate, for about 18 s more.
 
 TimePlanner.plan(): a reachable set on a grid (abscissa every DS_M, speed every V_STEP, time every
 DT_S), from the present state; at each step the speed changes by at most A_MAX x DT_S and stays below
@@ -15,14 +15,15 @@ profile slows down only for what forces it to (the first step, the only one flow
 replan, would otherwise slow down for nothing). If the set empties before the end of the horizon
 (an aircraft coming along the line: waiting is not enough), plan() returns None.
 
-TimeGuide: what the lap node runs every REPLAN_S, as flown on the bench (strategy T5 of §6.10):
+TimeGuide: what the lap node runs every REPLAN_S, as flown on the bench (strategy T9 of §6.10):
   - obstacles: every aircraft in vertical overlap; a holding aircraft (turn rate above LOITER_OMEGA)
     over the whole horizon, a transit only over TRANSIT_TRUST_S (it may turn or reverse; beyond, a
     straight line made up conflicts and delays that put the drone in the wrong place);
   - start: the state of the profile being flown if it sticks to the drone, else the drone's
     progression and its speed ALONG the line (a drone flying sideways does not progress);
   - margin ladder MARGINS_M: a profile planned exactly at the edge of the margin becomes impossible at
-    the next traffic update; less margin is accepted before handing over;
+    the next traffic update; less margin is accepted before handing over, down to 2 m (at 0 m, the
+    tracking error was enough to enter, on the bench and through MAVROS);
   - stall: a profile progressing less than STALL_M over the horizon (an aircraft circling on the line)
     is dropped, so that the local planner goes around;
   - after any hand-over, the local planner keeps control for HOLD_S (no chattering).
@@ -42,7 +43,7 @@ LOITER_OMEGA = 0.05          # rad/s: above, an aircraft circling (predictable o
 MIN_SPEED_CAP = 2.0          # m/s: allowed everywhere, so that the profile can leave a standstill
 # TimeGuide
 REPLAN_S = 1.0
-MARGINS_M = (6.0, 4.0, 2.0, 0.0)   # keep-away + this, tried in turn
+MARGINS_M = (6.0, 4.0, 2.0)  # keep-away + this, tried in turn; not 0: the tracking error then enters (§6.10)
 TRANSIT_TRUST_S = 15.0
 STALL_M = 30.0
 HOLD_S = 5.0
