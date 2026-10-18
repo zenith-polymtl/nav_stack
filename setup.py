@@ -14,13 +14,12 @@ setup(
     zip_safe=True,
     maintainer='Colin Rousseau',
     maintainer_email='colinc131@gmail.com',
-    description='Shared navigation nodes for Zenith mission repos: init and takeoff, GPS to local conversion, laps streaming with traffic avoidance',
+    description='Shared navigation nodes for Zenith mission repos: init and takeoff, GPS to local conversion',
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
             'init = nav_stack.init:main',
             'convert = nav_stack.convert:main',
-            'lap = nav_stack.lap:main',
         ],
     },
 )

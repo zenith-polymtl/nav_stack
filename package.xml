@@ -3,21 +3,16 @@
 <package format="3">
   <name>nav_stack</name>
   <version>1.0.0</version>
-  <description>Shared navigation nodes for Zenith mission repos: stream rates and takeoff on GO (init), GPS to local conversion from the mavros home (convert), Task 1 laps streamed in GUIDED, avoiding the competition traffic with a local planner (lap)</description>
+  <description>Shared navigation nodes for Zenith mission repos: stream rates and takeoff on GO (init), GPS to local conversion from the mavros home (convert)</description>
   <maintainer email="colinc131@gmail.com">Colin Rousseau</maintainer>
   <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
-  <depend>rcl_interfaces</depend>
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
-  <depend>geometry_msgs</depend>
   <depend>mavros_msgs</depend>
   <depend>custom_interfaces</depend>
   <depend>tools</depend>
-  <exec_depend>python3-numpy</exec_depend>
-  <exec_depend>python3-scipy</exec_depend>
-  <!-- clarabel (solveur du planificateur local) : pip, pas de paquet rosdep ; voir docker/ -->
 
   <export>
     <build_type>ament_python</build_type>
