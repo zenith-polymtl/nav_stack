@@ -20,6 +20,7 @@ setup(
         'console_scripts': [
             'init = nav_stack.init:main',
             'convert = nav_stack.convert:main',
+            'laps_nav = nav_stack.laps_nav:main'
         ],
     },
 )
