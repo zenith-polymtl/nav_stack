@@ -60,9 +60,11 @@ class MissionInit(Node):
         self.takeoff_alt = self.get_parameter('takeoff_alt').value
 
         self.takeoff_requested = False
-        self.successful_stream_requests = 0
-
+        
         self.takeoff_client = self.create_client(CommandTOL, MAVROS_TAKEOFF)
+
+        # Mavros message interval service: request the rates once, then cancel the timer
+        self.successful_stream_requests = 0
         self.msg_interval_client = self.create_client(MessageInterval, MAVROS_SET_MESSAGE_INTERVAL)
 
         self.takeoff_completed_pub = self.create_publisher(Bool, topics.TAKEOFF_COMPLETED, LATCHED)
