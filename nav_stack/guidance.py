@@ -258,6 +258,7 @@ class Guidance(Node):
             if not self.warned_no_pose:
                 self.warned_no_pose = True
                 self.get_logger().warn('Pas de pose récente de mavros : guidance se tait.')
+            self.state = GuidanceStatus.NO_POSE
             self.last_tick = None
             return
         self.warned_no_pose = False
