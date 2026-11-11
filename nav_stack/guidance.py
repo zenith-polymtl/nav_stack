@@ -51,7 +51,7 @@ PARAMETERS = {                     # name: default; config/hexa.yaml explains ea
     'latency_compensation': True,
     'uplink_delay_s': 0.02,
     'max_start_distance_m': 15.0,
-    'max_tracking_error_m': 25.0,
+    'max_tracking_error_m': 40.0,
     'pilot_timeout_s': 0.5,
     'pose_timeout_s': 0.5,
     'avoidance': True,             # the only one that changes in flight
