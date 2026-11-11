@@ -113,7 +113,7 @@ class Reference:
 
     def at(self, theta):
         """(points, tangents, speeds) at the progressions theta (array)."""
-        i = np.clip(np.searchsorted(self.s, theta) - 1, 0, len(self.s) - 2)
+        i = np.clip(np.searchsorted(self.s, theta, side='right') - 1, 0, len(self.s) - 2)
         f = np.clip((theta - self.s[i]) / np.maximum(self.s[i + 1] - self.s[i], 1e-6), 0, 1)
         return self.xy[i] * (1 - f)[:, None] + self.xy[i + 1] * f[:, None], self.tangent[i], self.speed[i]
 
