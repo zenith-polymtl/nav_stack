@@ -64,9 +64,10 @@ class Track:
         """(velocity at the last update, turn rate rad/s counterclockwise).
 
         One update: the velocity the server sent, no turn. Two or more: the finite difference of the
-        last two is the chord velocity, the velocity at mid-interval; three: the angle between the
-        last two chords, over the time between their midpoints, is the turn rate, and the chord
-        velocity turned by omega x half the interval is the tangent at the last update."""
+        last two is the chord velocity, along the velocity at mid-interval; three: the angle between
+        the last two chords, over the time between their midpoints, is the turn rate. On an arc, the
+        chord is shorter than the arc by sin(h) / h, h = omega x half the interval: the chord
+        velocity divided by that and turned by h is the velocity at the last update."""
         u = list(self.updates)
         if len(u) == 1:
             c = math.radians(u[0].course_deg)
@@ -80,8 +81,9 @@ class Track:
                 angle = math.atan2(v0[0] * v1[1] - v0[1] * v1[0], float(v0 @ v1))
                 omega = angle / ((u[-1].stamp - u[-3].stamp) / 2)
         if omega:
-            c, s = math.cos(omega * interval / 2), math.sin(omega * interval / 2)
-            v1 = np.array([c * v1[0] - s * v1[1], s * v1[0] + c * v1[1]])
+            h = omega * interval / 2
+            c, s = math.cos(h), math.sin(h)
+            v1 = h / s * np.array([c * v1[0] - s * v1[1], s * v1[0] + c * v1[1]])
         return v1, omega
 
     def predict(self, now, horizon_s, dt):
