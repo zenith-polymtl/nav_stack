@@ -35,9 +35,9 @@ from mavros_msgs.msg import HomePosition, PositionTarget, State
 from custom_interfaces.msg import GuidanceStatus, NavIntent, NavMode, TrafficArray, VelocityIntent
 from tools import topics
 
-from nav_stack import traffic
-from nav_stack.avoidance import Avoidance
+from nav_stack import path_follower, traffic
 from nav_stack.intent_path import Gate, IntentPath
+from nav_stack.path_follower import PathFollower
 
 # mavros is a third-party package: its topic names stay here, not in tools.topics (ARCHITECTURE.md)
 MAVROS_POSE = '/mavros/local_position/pose'
@@ -67,6 +67,10 @@ PATH_MODES = (NavMode.LAPS, NavMode.SEARCH, NavMode.RETURN)
 MODE_NAMES = {NavMode.NONE: 'NONE', NavMode.LAPS: 'LAPS', NavMode.SEARCH: 'SEARCH',
               NavMode.RETURN: 'RETURN', NavMode.PILOT: 'PILOT'}
 
+# path_follower states -> GuidanceStatus
+STATES = {path_follower.FOLLOWING: GuidanceStatus.FOLLOWING, path_follower.AVOIDING: GuidanceStatus.AVOIDING,
+          path_follower.BLOCKED: GuidanceStatus.BLOCKED, path_follower.DONE: GuidanceStatus.DONE}
+
 # Setpoint type masks (mavros converts ENU -> NED, yaw rate included)
 MASK_PATH = PositionTarget.IGNORE_YAW | PositionTarget.IGNORE_YAW_RATE   # position, velocity, acceleration
 MASK_HOLD = (PositionTarget.IGNORE_VX | PositionTarget.IGNORE_VY | PositionTarget.IGNORE_VZ
@@ -79,10 +83,6 @@ MASK_VELOCITY = (PositionTarget.IGNORE_PX | PositionTarget.IGNORE_PY | PositionT
 STATUS_RATE_HZ = 10.0        # topics.GUIDANCE_STATUS (guidance.md §4)
 SUMMARY_RATE_HZ = 1.0        # topics.GUIDANCE_SUMMARY, to the ground
 MAX_DT = 0.25                # s, a longer gap between ticks does not open the progression window wider
-MAX_EXTRAPOLATION_S = 0.3    # latency compensation never extrapolates further
-END_DISTANCE_M = 1.0         # progression this close to the end: path done
-TRACKING_RESTORE_M = 8.0     # tracking guard: feedforward back below this error...
-RESTORE_PROGRESS_M = 1.0     # ...once the progression has moved this much since the loss
 HOLD_CAPTURE_SPEED = 0.3     # m/s: holding, the drone brakes (zero velocity) down to this, then holds its point
 
 # ArduPilot LATLON_TO_M (AP_Math/definitions.h), per degree: the same flat-earth formula as convert
@@ -97,15 +97,11 @@ class Guidance(Node):
         super().__init__('guidance')
         p = {name: self.declare_parameter(name, default).value for name, default in PARAMETERS.items()}
         self.period = 1.0 / p['control_rate_hz']
-        self.latency_compensation = p['latency_compensation']
-        self.uplink_delay = p['uplink_delay_s']
         self.max_start_distance = p['max_start_distance_m']
-        self.max_tracking_error = p['max_tracking_error_m']
         self.pilot_timeout = p['pilot_timeout_s']
         self.pose_timeout = p['pose_timeout_s']
         self.avoidance = p['avoidance']
-        self.avoidance_settings = dict(replan_s=p['replan_s'], threat_range_m=p['threat_range_m'],
-                                       margin_hard_m=p['margin_hard_m'], margin_soft_m=p['margin_soft_m'])
+        self.follower_settings = p   # PathFollower reads its own parameters from them
         self.declare_parameter('boundary.lat', Parameter.Type.DOUBLE_ARRAY)   # from the site file
         self.declare_parameter('boundary.lon', Parameter.Type.DOUBLE_ARRAY)
         self.boundary_gps = self.read_boundary()   # (lat, lon) vertices, or None: no avoidance
@@ -123,12 +119,9 @@ class Guidance(Node):
         self.pilot_received = None    # Time of its reception
         self.tracks = {}              # aircraft index -> traffic.Track, local frame
         # Path modes
-        self.paths = {}               # path mode -> IntentPath being followed
-        self.avoidances = {}          # path mode -> Avoidance along its path (none without a boundary)
+        self.followers = {}           # path mode -> PathFollower: its path, avoidance and tracking guard
         self.rejected = set()         # (mode, intent_id) refused: not retried until a new intent_id
         self.last_tick = None         # Time of the last path tick, for dt
-        self.tracking_lost = False    # tracking guard (update_tracking_guard)
-        self.progress_at_loss = 0.0
         # Output
         self.state = GuidanceStatus.NOT_GUIDED
         self.hold_point = None        # xyz held, None while not holding
@@ -196,7 +189,8 @@ class Guidance(Node):
         self.nav_mode = msg.mode
         self.hold_point = None
         self.last_tick = None
-        self.tracking_lost = False
+        if msg.mode in self.followers:
+            self.followers[msg.mode].reset_guard()
         self.pilot_lost = False
 
     def callback_intent(self, msg):
@@ -276,58 +270,26 @@ class Guidance(Node):
     def fly_path(self, now, measured, pose_age):
         dt = self.period if self.last_tick is None else min((now - self.last_tick).nanoseconds * 1e-9, MAX_DT)
         self.last_tick = now
-        path = self.select_path(measured)
-        if path is None:
+        follower = self.select_path(measured)
+        if follower is None:
             self.hold(measured)
             self.state = GuidanceStatus.NO_INTENT
             return
         self.hold_point = None
-
-        # Where the drone will be when this setpoint reaches the autopilot
-        predicted = measured
-        if self.latency_compensation:
-            predicted = measured + self.velocity * min(max(pose_age, 0.0) + self.uplink_delay, MAX_EXTRAPOLATION_S)
-        path.advance(predicted[:2], float(np.hypot(*self.velocity[:2])), dt)
-        for gate in path.update_gates(measured[:2]):
-            self.get_logger().error(
-                f'Porte du WP n°{gate.index} laissée derrière sans y passer à moins de {gate.tolerance:.0f} m.')
-
-        if path.remaining < END_DISTANCE_M:
-            self.stop_avoidance(self.nav_mode)
-            final = path.sample(path.length)[0]
-            self.publish_setpoint(final, np.zeros(3), np.zeros(3), MASK_PATH)
-            if self.state != GuidanceStatus.DONE:
-                self.get_logger().info(
-                    f'{MODE_NAMES[self.nav_mode]} n°{path.intent_id} : fin du chemin, point final tenu '
-                    f'({path.gates_passed}/{len(path.gates)} portes passées).')
-            self.state = GuidanceStatus.DONE
-            return
-
-        pos, vel, acc = path.sample(path.progress)
-        state = GuidanceStatus.FOLLOWING
-        avoidance = self.avoidances.get(self.nav_mode) if self.avoidance else None
-        if avoidance is not None:
-            t = now.nanoseconds * 1e-9
-            plan = avoidance.update(t, path, predicted[:2], self.velocity, measured[2] - self.home.position.z,
-                                    self.tracks.values())
-            if plan is not None:   # horizontal from the local plan, vertical from the path
-                pos[:2], vel[:2], acc[:2] = plan.at(t)
-                waiting = avoidance.waiting and path.next_gate is not None
-                state = GuidanceStatus.BLOCKED if waiting else GuidanceStatus.AVOIDING
-        if not self.update_tracking_guard(pos[:2], measured[:2], path.progress):
-            vel, acc = np.zeros(3), np.zeros(3)
+        pos, vel, acc, state = follower.step(now.nanoseconds * 1e-9, dt, measured, self.velocity, pose_age,
+                                             self.home.position.z, self.tracks.values(), self.avoidance)
         self.publish_setpoint(pos, vel, acc, MASK_PATH)
-        self.state = state
+        self.state = STATES[state]
 
     def select_path(self, measured):
-        """The path of the active mode. A new intent_id starts a new path (start_path); until one
-        can be followed, None: the drone holds its position."""
+        """The PathFollower of the active mode. A new intent_id starts a new path (start_path); until
+        one can be followed, None: the drone holds its position."""
         mode = self.nav_mode
         msg = self.intents.get(mode)
         if msg is None:
             return None
-        current = self.paths.get(mode)
-        if current is not None and current.intent_id == msg.intent_id:
+        current = self.followers.get(mode)
+        if current is not None and current.path.intent_id == msg.intent_id:
             return current
         if (mode, msg.intent_id) in self.rejected:
             return None
@@ -353,16 +315,14 @@ class Guidance(Node):
         if path.dropped:
             self.get_logger().warn(f'NavIntent n°{msg.intent_id} : {path.dropped} points à abscisse s non croissante retirés.')
         self.stop_avoidance(mode)   # logs the end of an avoidance on the path being replaced
-        self.paths[mode] = path
-        self.tracking_lost = False
-        self.avoidances.pop(mode, None)
+        boundary = None
         if self.boundary_gps:
             boundary = [to_local(lat, lon, self.home) for lat, lon in self.boundary_gps]
-            self.avoidances[mode] = Avoidance(path, boundary, logger=self.get_logger(), **self.avoidance_settings)
+        self.followers[mode] = PathFollower(path, boundary, self.follower_settings, self.get_logger())
         self.get_logger().info(
             f'{MODE_NAMES[mode]} n°{msg.intent_id} suivie : {path.length:.0f} m, {len(path.gates)} portes, '
             f'drone à {distance:.1f} m du premier point.')
-        return path
+        return self.followers[mode]
 
     def reject(self, mode, intent_id, reason):
         """Refuses a new intent_id for good. The previous path of the mode is kept, in case its
@@ -373,26 +333,9 @@ class Guidance(Node):
 
     def stop_avoidance(self, mode):
         """Back to the path in that mode, if it was avoiding."""
-        avoidance = self.avoidances.get(mode)
-        if avoidance is not None:
-            avoidance.stop(self.paths[mode].progress)
-
-    def update_tracking_guard(self, setpoint_xy, measured_xy, progress):
-        """False while the drone is lost from its setpoint: then the position alone is sent.
-
-        Beyond max_tracking_error_m, a velocity feedforward that the position no longer justifies
-        sends the drone away in a straight line (ArduPilot bounds the position correction, not the
-        feedforward). It comes back once the drone is within TRACKING_RESTORE_M and the progression
-        has moved RESTORE_PROGRESS_M since the loss."""
-        error = float(np.linalg.norm(setpoint_xy - measured_xy))
-        if not self.tracking_lost and error > self.max_tracking_error:
-            self.tracking_lost = True
-            self.progress_at_loss = progress
-            self.get_logger().error(f'Drone à {error:.0f} m de sa consigne : feedforward coupé, position seule.')
-        elif self.tracking_lost and error < TRACKING_RESTORE_M and progress > self.progress_at_loss + RESTORE_PROGRESS_M:
-            self.tracking_lost = False
-            self.get_logger().info('Drone revenu sur sa consigne : feedforward rétabli.')
-        return not self.tracking_lost
+        follower = self.followers.get(mode)
+        if follower is not None:
+            follower.stop_avoidance()
 
     # ------------------------------------------------------------------ pilot mode
     def fly_pilot(self, now, measured):
@@ -457,10 +400,11 @@ class Guidance(Node):
         msg.header.frame_id = LOCAL_FRAME
         msg.mode = self.nav_mode
         msg.state = self.state
-        avoidance = self.avoidances.get(self.nav_mode)
+        follower = self.followers.get(self.nav_mode)
+        avoidance = None if follower is None else follower.avoidance
         msg.threats = 0 if avoidance is None else min(avoidance.threat_count, 255)
         msg.min_margin_m = math.nan if avoidance is None else float(avoidance.min_margin)
-        path = self.paths.get(self.nav_mode)
+        path = None if follower is None else follower.path
         if path is not None and path.intent_id == self.intents[self.nav_mode].intent_id:   # not a replaced path
             msg.intent_id = path.intent_id
             msg.progress_m = float(path.progress)
