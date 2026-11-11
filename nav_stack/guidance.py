@@ -289,6 +289,7 @@ class Guidance(Node):
                 f'Porte du WP n°{gate.index} laissée derrière sans y passer à moins de {gate.tolerance:.0f} m.')
 
         if path.remaining < END_DISTANCE_M:
+            self.stop_avoidance(self.nav_mode)
             final = path.sample(path.length)[0]
             self.publish_setpoint(final, np.zeros(3), np.zeros(3), MASK_PATH)
             if self.state != GuidanceStatus.DONE:
