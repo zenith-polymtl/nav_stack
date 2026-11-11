@@ -10,6 +10,15 @@ and holding circles), from the time of the position, which comp_client estimates
 measured link latency). laps_navigation_sitl_research.md §6.7, point 2: the previous version (chord
 velocity, step integration, rounded age) was 4 to 10 m off after 10 s on a holding circle.
 
+Learned loops. The server's traffic is deterministic and loops forever (a transit runs its polyline
+again and again, segments of whole seconds; a holding circle turns at constant rate), and comp_client
+receives it from its connection, minutes before takeoff. Each Track keeps a journal of its updates;
+once the last LOOP_CHECK updates repeat updates exactly one period earlier (an integer number of
+seconds, LOOP_MATCH_M), the period is the aircraft's loop and the prediction replays the journal one
+period back: exact at any horizon, corners of transits included (the corner between two updates is
+rebuilt from the two courses). A replay that misses a new update by more than LOOP_MATCH_M is dropped,
+and the constant turn prediction takes over until a loop is found again.
+
 Frames: ENU, meters (x east, y north: the course sent by the server is read that way); the guidance
 node uses the mavros local frame. Altitudes: meters above ground.
 """
@@ -24,6 +33,14 @@ STALE_S = 3.0              # an aircraft without an update for this long is igno
 MIN_SPEED_FOR_TURN = 0.5   # m/s: below this, no turn rate estimate
 MIN_TURN_RATE = 1e-6       # rad/s: below this, a straight line
 MAX_ARC_CORRECTION = math.pi / 4   # rad: past this half-turn between updates, the chord is not lengthened
+JOURNAL_S = 900.0          # s of updates kept to find loops (the longest loop that can be learned)
+MIN_LOOP_S = 20.0          # s: shorter periods are not searched (a holding circle is exact without a loop)
+LOOP_CHECK = 10            # updates that must repeat one period earlier
+LOOP_MATCH_M = 2.0         # m: a repeat, and the tolerance of a replay against a new update
+STAMP_MATCH_S = 0.3        # s: two stamps one period apart, within this
+SAME_COURSE_DEG = 1.0      # below this course change between two updates, no corner between them
+CIRCLE_SPREAD_DEG = 0.5    # course changes this steady (and not zero) over a loop: a holding circle, left to
+                           # the constant turn (exact; its period is not a whole number of seconds)
 
 
 @dataclass
@@ -40,9 +57,12 @@ class Update:
 class Track:
     """One aircraft: its last HISTORY updates."""
 
-    def __init__(self, name):
+    def __init__(self, name, learn_loops=True):
         self.name = name
         self.updates = deque(maxlen=HISTORY)
+        self.learn_loops = learn_loops
+        self.journal = deque()        # every update of the last JOURNAL_S
+        self.loop = None              # Loop once learned
 
     def add(self, update):
         """Keeps the update; a repeat is ignored, a gap longer than STALE_S restarts the history."""
@@ -53,6 +73,15 @@ class Track:
             if update.stamp - last > STALE_S:
                 self.updates.clear()
         self.updates.append(update)
+        if not self.learn_loops:
+            return
+        self.journal.append(update)
+        while self.journal[0].stamp < update.stamp - JOURNAL_S:
+            self.journal.popleft()
+        if self.loop is not None and np.hypot(*(self.loop.at(np.array([update.stamp]))[0] - update.xy)) > LOOP_MATCH_M:
+            self.loop = None          # the aircraft left its loop (or the site changed)
+        if self.loop is None:
+            self.loop = find_loop(list(self.journal))
 
     @property
     def last(self):
@@ -91,6 +120,8 @@ class Track:
 
     def predict(self, now, horizon_s, dt):
         """Predicted positions from now to now + horizon_s, every dt: array (n, 2)."""
+        if self.loop is not None:
+            return self.loop.at(now + np.arange(int(round(horizon_s / dt)) + 1) * dt)
         velocity, omega = self.velocity_and_turn()
         tau = max(self.age(now), 0.0) + np.arange(int(round(horizon_s / dt)) + 1) * dt
         return _constant_turn(self.last.xy, velocity, omega, tau)
@@ -104,3 +135,83 @@ def _constant_turn(position, velocity, omega, tau):
     perp = np.array([-v[1], v[0]])               # v turned 90 degrees counterclockwise
     along, across = np.sin(omega * tau) / omega, (1.0 - np.cos(omega * tau)) / omega
     return p + along[:, None] * v + across[:, None] * perp
+
+
+def _direction(course_deg):
+    c = math.radians(course_deg)
+    return np.array([math.sin(c), math.cos(c)])
+
+
+class Loop:
+    """One period of an aircraft's journal, replayed: positions at any time, corners rebuilt."""
+
+    def __init__(self, updates, period):
+        self.period = period
+        t, xy = [], []
+        for a, b in zip(updates, updates[1:]):
+            t.append(a.stamp)
+            xy.append(a.xy)
+            corner = _corner(a, b)
+            if corner is not None:
+                t.append(corner[0])
+                xy.append(corner[1])
+        t.append(updates[-1].stamp)
+        xy.append(updates[-1].xy)
+        self.t = np.array(t)
+        self.xy = np.array(xy)
+
+    def at(self, times):
+        """Positions (n, 2) at the given times."""
+        phase = self.t[0] + np.mod(np.asarray(times, float) - self.t[0], self.period)
+        return np.column_stack([np.interp(phase, self.t, self.xy[:, 0]), np.interp(phase, self.t, self.xy[:, 1])])
+
+
+def _corner(a, b):
+    """(time, position) of the corner between updates a and b, or None: same course, or no sensible corner."""
+    turn = (b.course_deg - a.course_deg + 180.0) % 360.0 - 180.0
+    if abs(turn) < SAME_COURSE_DEG:
+        return None
+    da, db = _direction(a.course_deg), _direction(b.course_deg)
+    cross = da[0] * db[1] - da[1] * db[0]
+    if abs(cross) < 1e-6:          # reversal (180 degrees): the corner is beyond both, along a's course
+        span = float(np.hypot(*(b.xy - a.xy)))
+        ahead = float((b.xy - a.xy) @ da)
+        ka = (span + ahead) / 2 if ahead > 0 else span / 2
+        point = a.xy + da * ka
+        kb = float(np.hypot(*(b.xy - point)))
+    else:
+        rel = b.xy - a.xy
+        ka = (rel[0] * db[1] - rel[1] * db[0]) / cross      # a.xy + ka da = b.xy - kb db
+        kb = -(rel[0] * da[1] - rel[1] * da[0]) / cross
+        if ka < 0 or kb < 0:
+            return None
+        point = a.xy + ka * da
+    if ka + kb <= 0:
+        return None
+    return a.stamp + (b.stamp - a.stamp) * ka / (ka + kb), point
+
+
+def find_loop(journal):
+    """The aircraft's Loop if the last LOOP_CHECK updates repeat one period earlier, else None."""
+    if len(journal) < LOOP_CHECK + 2:
+        return None
+    last = journal[-1]
+    stamps = np.array([u.stamp for u in journal])
+    xy = np.array([u.xy for u in journal])
+    candidates = np.flatnonzero((stamps <= last.stamp - MIN_LOOP_S) & (np.hypot(*(xy - last.xy).T) <= LOOP_MATCH_M))
+    for i in candidates[::-1]:     # the most recent repeat first: the shortest period
+        period = last.stamp - stamps[i]
+        ok = True
+        for u in list(journal)[-LOOP_CHECK:]:
+            j = int(np.argmin(np.abs(stamps - (u.stamp - period))))
+            if abs(stamps[j] - (u.stamp - period)) > STAMP_MATCH_S or np.hypot(*(xy[j] - u.xy)) > LOOP_MATCH_M:
+                ok = False
+                break
+        if ok:
+            first = int(np.argmin(np.abs(stamps - (last.stamp - period))))
+            cycle = list(journal)[first:]
+            turns = np.array([(b.course_deg - a.course_deg + 180.0) % 360.0 - 180.0 for a, b in zip(cycle, cycle[1:])])
+            if np.std(turns) < CIRCLE_SPREAD_DEG and abs(np.mean(turns)) > SAME_COURSE_DEG:
+                return None
+            return Loop(cycle, period)
+    return None
