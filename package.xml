@@ -15,6 +15,7 @@
   <depend>custom_interfaces</depend>
   <depend>tools</depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>   <!-- local_planner ; clarabel (pas de clé rosdep) : pip dans le Dockerfile -->
 
   <export>
     <build_type>ament_python</build_type>
