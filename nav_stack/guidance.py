@@ -135,6 +135,7 @@ class Guidance(Node):
         # Warnings given once per episode
         self.warned_no_pose = False
         self.warned_traffic_no_home = False
+        self.warned_intent_no_home = False
         self.pilot_lost = False
         self.add_on_set_parameters_callback(self.callback_parameters)
 
@@ -325,7 +326,12 @@ class Guidance(Node):
         current = self.paths.get(mode)
         if current is not None and current.intent_id == msg.intent_id:
             return current
-        if (mode, msg.intent_id) in self.rejected or self.home is None:   # NavPoint z is above home
+        if (mode, msg.intent_id) in self.rejected:
+            return None
+        if self.home is None:   # NavPoint z is a height above home
+            if not self.warned_intent_no_home:
+                self.warned_intent_no_home = True
+                self.get_logger().warn('NavIntent reçue avant le home de mavros : le drone tient sa position tant que le home manque.')
             return None
         return self.start_path(mode, msg, measured)
 
