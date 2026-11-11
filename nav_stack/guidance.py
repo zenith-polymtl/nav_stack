@@ -96,7 +96,7 @@ RESTORE_PROGRESS_M = 1.0     # ...once the progression has moved this much since
 HOLD_CAPTURE_SPEED = 0.3     # m/s: holding, the drone brakes (zero velocity) down to this, then holds its point
 GATE_MARGIN_M = 1.0          # the planner's gate is the NavGate tolerance minus this
 MAX_OBSTACLES = 4            # nearest threatening aircraft given to the planner
-VERTICAL_MARGIN_M = 3.0      # an aircraft counts if |altitude difference| <= its vka + this
+VERTICAL_MARGIN_M = 3.0      # an aircraft counts if |altitude difference| <= its vertical keep-away + this
 BLOCKED_PROGRESS_M = 1.0     # a plan that progresses less than this over its horizon waits: BLOCKED
 RUNTIME_PARAMETERS = ('avoidance',)
 
@@ -510,13 +510,13 @@ class Guidance(Node):
             if track.age(now) > traffic.STALE_S:
                 continue
             last = track.last
-            if not np.any(np.abs(altitudes - last.altitude) <= last.vka + VERTICAL_MARGIN_M):
+            if not np.any(np.abs(altitudes - last.altitude) <= last.vertical_keep_away + VERTICAL_MARGIN_M):
                 continue
             centers = track.predict(now, local_planner.HORIZON_S, local_planner.DT)
-            margin = min(margin, float(np.min(np.hypot(*(centers - flown).T))) - last.hka)
+            margin = min(margin, float(np.min(np.hypot(*(centers - flown).T))) - last.horizontal_keep_away)
             near = min(float(np.min(np.hypot(*(centers - ahead).T))), float(np.hypot(*(centers[0] - xy))))
             if near < self.threat_range:
-                found.append((near, local_planner.Obstacle(centers, last.hka)))
+                found.append((near, local_planner.Obstacle(centers, last.horizontal_keep_away)))
         found.sort(key=lambda f: f[0])
         self.threat_count = len(found)
         self.min_margin = margin if math.isfinite(margin) else math.nan
