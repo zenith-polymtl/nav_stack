@@ -197,6 +197,7 @@ class Guidance(Node):
         self.hold_point = None
         self.last_tick = None
         self.tracking_lost = False
+        self.pilot_lost = False
 
     def callback_intent(self, msg):
         if msg.mode not in PATH_MODES:
