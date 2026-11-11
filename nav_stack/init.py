@@ -23,11 +23,27 @@ MAVROS_REL_ALT = '/mavros/global_position/rel_alt'
 MAVROS_TAKEOFF = '/mavros/cmd/takeoff'
 MAVROS_SET_MESSAGE_INTERVAL = '/mavros/set_message_interval'
 
-# MAVLink messages streamed at stream_rate_hz: local and global position, RC channels
+# MAVLink messages requested.
+# Pour rajouter un message :
+# 1. ajouter son ID MAVLink dans MAVLINK_XXX ci-dessous.
+# 2. ajouter son taux de streaming dans STREAM_RATES_HZ ci-dessous.
+# 3. ajouter une ligne dans la fonction stream_rate_done() pour loguer le taux demandé.
+MAVLINK_SYS_STATUS = 1
+MAVLINK_SYSTEM_TIME = 2
+MAVLINK_GPS_RAW_INT = 24
+
 MAVLINK_LOCAL_POSITION_NED = 32
 MAVLINK_GLOBAL_POSITION_INT = 33   # also feeds rel_alt
 MAVLINK_RC_CHANNELS = 65
-STREAMED_MESSAGES = (MAVLINK_GLOBAL_POSITION_INT, MAVLINK_LOCAL_POSITION_NED, MAVLINK_RC_CHANNELS)
+
+STREAM_RATES_HZ = {
+    MAVLINK_SYS_STATUS: 1.0,              # comp_client
+    MAVLINK_SYSTEM_TIME: 1.0,             # comp_client
+    MAVLINK_GPS_RAW_INT: 10.0,            # comp_client
+    MAVLINK_LOCAL_POSITION_NED: 25.0,
+    MAVLINK_GLOBAL_POSITION_INT: 25.0,
+    MAVLINK_RC_CHANNELS: 25.0
+    }
 
 MAV_RESULT_FAILED = 4   # CommandTOL result: not armed in GUIDED, or already flying
 TAKEOFF_ALT_TOLERANCE_M = 2.0
@@ -41,14 +57,14 @@ class MissionInit(Node):
         super().__init__('mission_init')
 
         self.declare_parameter('takeoff_alt', Parameter.Type.DOUBLE)
-        self.declare_parameter('stream_rate_hz', 25.0)
         self.takeoff_alt = self.get_parameter('takeoff_alt').value
-        self.stream_rate = self.get_parameter('stream_rate_hz').value
 
         self.takeoff_requested = False
-        self.successful_stream_requests = 0
-
+        
         self.takeoff_client = self.create_client(CommandTOL, MAVROS_TAKEOFF)
+
+        # Mavros message interval service: request the rates once, then cancel the timer
+        self.successful_stream_requests = 0
         self.msg_interval_client = self.create_client(MessageInterval, MAVROS_SET_MESSAGE_INTERVAL)
 
         self.takeoff_completed_pub = self.create_publisher(Bool, topics.TAKEOFF_COMPLETED, LATCHED)
@@ -61,13 +77,16 @@ class MissionInit(Node):
 
         self.get_logger().info('Node init prête, en attente du GO.')
 
+    # ------------------------------------------------------------------ 
+    # mavros message rate
+    # ------------------------------------------------------------------
     def request_stream_rates(self):
         if not self.msg_interval_client.service_is_ready():
             return
         self.stream_timer.cancel()
         self.successful_stream_requests = 0
-        for message_id in STREAMED_MESSAGES:
-            request = MessageInterval.Request(message_id=message_id, message_rate=self.stream_rate)
+        for message_id, rate in STREAM_RATES_HZ.items():
+            request = MessageInterval.Request(message_id=message_id, message_rate=rate)
             self.msg_interval_client.call_async(request).add_done_callback(self.stream_rate_done)
 
     def stream_rate_done(self, future):
@@ -78,12 +97,22 @@ class MissionInit(Node):
             return
         if response.success:
             self.successful_stream_requests += 1
-            if self.successful_stream_requests == len(STREAMED_MESSAGES):
-                self.get_logger().info(f'Messages MAVLink de position et RC réglés à {self.stream_rate} Hz')
+            if self.successful_stream_requests == len(STREAM_RATES_HZ):
+                self.get_logger().info(f'Messages MAVLink réglés à : '
+                                       f'SYS_STATUS {STREAM_RATES_HZ[MAVLINK_SYS_STATUS]} Hz, '
+                                       f'SYSTEM_TIME {STREAM_RATES_HZ[MAVLINK_SYSTEM_TIME]} Hz, '
+                                       f'GPS_RAW_INT {STREAM_RATES_HZ[MAVLINK_GPS_RAW_INT]} Hz, '
+                                       f'LOCAL_POSITION_NED {STREAM_RATES_HZ[MAVLINK_LOCAL_POSITION_NED]} Hz, '
+                                       f'GLOBAL_POSITION_INT {STREAM_RATES_HZ[MAVLINK_GLOBAL_POSITION_INT]} Hz, '
+                                       f'RC_CHANNELS {STREAM_RATES_HZ[MAVLINK_RC_CHANNELS]} Hz')
         elif self.stream_timer.is_canceled():   # one retry per batch, even if several requests fail
             self.get_logger().warn('Réglage de fréquence MAVLink refusé, nouvel essai')
             self.stream_timer.reset()
 
+    # ------------------------------------------------------------------
+    #
+    # ------------------------------------------------------------------
+    
     def callback_go(self, msg):
         if not msg.data or self.takeoff_requested:
             return
