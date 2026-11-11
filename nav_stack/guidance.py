@@ -515,6 +515,7 @@ class Guidance(Node):
         self.last_replan = -math.inf
         self.threat_count = 0
         self.min_margin = math.nan
+        self.fail_streak = 0
         if not self.avoiding:
             return
         self.avoiding = False
@@ -524,6 +525,8 @@ class Guidance(Node):
             self.get_logger().info(
                 f'Fin d\'évitement à {self.paths[self.nav_mode].progress:.0f} m. Plans : {len(times)}, '
                 f'{np.median(times):.0f} ms en médiane, {times.max():.0f} ms au pire, {planner.failures} ratés.')
+            planner.solve_times.clear()   # the statistics of the next avoidance start over
+            planner.failures = 0
 
     def hold(self, measured, yaw_rate=0.0):
         """Brakes (zero velocity) down to HOLD_CAPTURE_SPEED, then holds the point where it stopped."""
