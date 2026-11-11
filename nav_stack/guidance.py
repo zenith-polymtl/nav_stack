@@ -122,18 +122,6 @@ def to_local(lat, lon, home):
     return np.array([home.position.x + east, home.position.y + north])
 
 
-def planner_reference(path):
-    """local_planner.Reference of a path. Its tangent comes from the velocity; where the path asks
-    for less than 0.5 m/s (a stop), the geometric direction is used instead, at 0.5 m/s."""
-    xy = path.xyz[:, :2]
-    velocity = path.velocity[:, :2].copy()
-    direction = np.gradient(xy, axis=0)
-    norm = np.maximum(np.linalg.norm(direction, axis=1), 1e-9)
-    slow = np.linalg.norm(velocity, axis=1) < 0.5
-    velocity[slow] = 0.5 * direction[slow] / norm[slow, None]
-    return local_planner.Reference(path.s, xy, velocity)
-
-
 def yaw_of(q):
     """Yaw (rad, ENU, counterclockwise from east) of a quaternion."""
     return math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
@@ -408,8 +396,9 @@ class Guidance(Node):
         self.planners.pop(mode, None)
         if self.boundary_gps:
             boundary = [to_local(lat, lon, self.home) for lat, lon in self.boundary_gps]
-            self.planners[mode] = local_planner.LocalPlanner(planner_reference(path), boundary,
-                                                             self.margin_hard, self.margin_soft)
+            self.planners[mode] = local_planner.LocalPlanner(
+                local_planner.Reference(path.s, path.xyz[:, :2], path.velocity[:, :2]), boundary,
+                self.margin_hard, self.margin_soft)
         self.get_logger().info(
             f'{MODE_NAMES[mode]} n°{msg.intent_id} suivie : {path.length:.0f} m, {len(path.gates)} portes, '
             f'drone à {distance:.1f} m du premier point.')
@@ -480,9 +469,8 @@ class Guidance(Node):
     def replan(self, now, path, planner, xy, obstacles):
         gate = path.next_gate
         if gate is not None:
-            planner.gate_tol = max(gate.tolerance - GATE_MARGIN_M, 1.0)
-        plan = planner.plan(path.progress, xy, self.velocity[:2], obstacles,
-                            None if gate is None else (gate.s_apex, gate.xy), now)
+            gate = (gate.s_apex, gate.xy, max(gate.tolerance - GATE_MARGIN_M, 1.0))
+        plan = planner.plan(path.progress, xy, self.velocity[:2], obstacles, gate, now)
         if plan is not None:
             if self.fail_streak > 1:
                 self.get_logger().info(f'Plan local rétabli après {self.fail_streak} échecs de suite.')
