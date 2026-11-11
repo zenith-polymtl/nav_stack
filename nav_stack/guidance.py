@@ -160,7 +160,7 @@ class Guidance(Node):
         self.declare_parameter('avoidance', True)
         self.declare_parameter('replan_s', 0.25)
         self.declare_parameter('threat_range_m', 120.0)
-        self.declare_parameter('margin_hard_m', 4.0)
+        self.declare_parameter('margin_hard_m', 3.0)
         self.declare_parameter('margin_soft_m', 15.0)
         self.declare_parameter('boundary.lat', Parameter.Type.DOUBLE_ARRAY)   # from the site file
         self.declare_parameter('boundary.lon', Parameter.Type.DOUBLE_ARRAY)
