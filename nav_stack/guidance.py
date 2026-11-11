@@ -364,13 +364,11 @@ class Guidance(Node):
         return path
 
     def reject(self, mode, intent_id, reason):
-        """Refuses a new intent_id for good. The previous path of the mode is dropped: the mode
-        node replaced it, so it will not be flown again, and the status no longer shows it."""
+        """Refuses a new intent_id for good. The previous path of the mode is kept, in case its
+        intent_id comes back, but no longer followed: its avoidance stops."""
         self.rejected.add((mode, intent_id))
         self.get_logger().error(f'{MODE_NAMES[mode]} n°{intent_id} refusée : {reason}. Le drone tient sa position.')
         self.stop_avoidance(mode)
-        self.paths.pop(mode, None)
-        self.avoidances.pop(mode, None)
 
     def stop_avoidance(self, mode):
         """Back to the path in that mode, if it was avoiding."""
@@ -462,7 +460,7 @@ class Guidance(Node):
         msg.threats = 0 if avoidance is None else min(avoidance.threat_count, 255)
         msg.min_margin_m = math.nan if avoidance is None else float(avoidance.min_margin)
         path = self.paths.get(self.nav_mode)
-        if path is not None:
+        if path is not None and path.intent_id == self.intents[self.nav_mode].intent_id:   # not a replaced path
             msg.intent_id = path.intent_id
             msg.progress_m = float(path.progress)
             msg.length_m = float(path.length)
