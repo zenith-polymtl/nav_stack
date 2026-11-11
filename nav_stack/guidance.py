@@ -189,8 +189,9 @@ class Guidance(Node):
         if msg.mode not in MODE_NAMES:
             self.get_logger().error(f'NavMode inconnu ({msg.mode}) : ignoré.')
             return
-        if msg.mode != self.nav_mode:
-            self.get_logger().info(f'Mode de navigation : {MODE_NAMES[self.nav_mode]} -> {MODE_NAMES[msg.mode]}.')
+        if msg.mode == self.nav_mode:
+            return   # republished (latched topic, state_machine_t1 restarted): nothing changes
+        self.get_logger().info(f'Mode de navigation : {MODE_NAMES[self.nav_mode]} -> {MODE_NAMES[msg.mode]}.')
         self.stop_avoidance(self.nav_mode)
         self.nav_mode = msg.mode
         self.hold_point = None
