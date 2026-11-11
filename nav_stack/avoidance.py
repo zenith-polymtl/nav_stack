@@ -47,11 +47,12 @@ class Avoidance:
         tracks: the traffic.Track of every aircraft known."""
         if now - self.last_replan >= self.replan_s:
             self.last_replan = now
-            obstacles, self.threat_count, self.min_margin = self._threats(
-                now, path.progress, xy, velocity, altitude, tracks)
+            obstacles, threat_count, min_margin = self._threats(now, path.progress, xy, velocity, altitude, tracks)
             if not obstacles:
                 self.stop(path.progress)
+                self.min_margin = min_margin   # still reported: the nearest aircraft, even far away
                 return None
+            self.threat_count, self.min_margin = threat_count, min_margin
             if not self.active:
                 self.active = True
                 self.log.info(f'Évitement : {len(obstacles)} avion(s) menace(nt), plans locaux.')
