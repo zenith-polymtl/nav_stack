@@ -23,6 +23,7 @@ HISTORY = 3                # updates kept per aircraft
 STALE_S = 3.0              # an aircraft without an update for this long is ignored, its history restarts
 MIN_SPEED_FOR_TURN = 0.5   # m/s: below this, no turn rate estimate
 MIN_TURN_RATE = 1e-6       # rad/s: below this, a straight line
+MAX_ARC_CORRECTION = math.pi / 4   # rad: past this half-turn between updates, the chord is not lengthened
 
 
 @dataclass
@@ -67,7 +68,8 @@ class Track:
         last two is the chord velocity, along the velocity at mid-interval; three: the angle between
         the last two chords, over the time between their midpoints, is the turn rate. On an arc, the
         chord is shorter than the arc by sin(h) / h, h = omega x half the interval: the chord
-        velocity divided by that and turned by h is the velocity at the last update."""
+        velocity divided by that (for |h| < MAX_ARC_CORRECTION) and turned by h is the velocity at
+        the last update."""
         u = list(self.updates)
         if len(u) == 1:
             c = math.radians(u[0].course_deg)
@@ -83,7 +85,8 @@ class Track:
         if omega:
             h = omega * interval / 2
             c, s = math.cos(h), math.sin(h)
-            v1 = h / s * np.array([c * v1[0] - s * v1[1], s * v1[0] + c * v1[1]])
+            arc = h / s if abs(h) < MAX_ARC_CORRECTION else 1.0   # noisy close updates: h near pi, h / s unbounded
+            v1 = arc * np.array([c * v1[0] - s * v1[1], s * v1[0] + c * v1[1]])
         return v1, omega
 
     def predict(self, now, horizon_s, dt):
