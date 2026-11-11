@@ -390,9 +390,9 @@ class Guidance(Node):
             return None
         if path.dropped:
             self.get_logger().warn(f'NavIntent n°{msg.intent_id} : {path.dropped} points à abscisse s non croissante retirés.')
+        self.stop_avoiding()          # logs the end of an avoidance on the path being replaced
         self.paths[mode] = path
         self.tracking_lost = False
-        self.stop_avoiding()
         self.planners.pop(mode, None)
         if self.boundary_gps:
             boundary = [to_local(lat, lon, self.home) for lat, lon in self.boundary_gps]
