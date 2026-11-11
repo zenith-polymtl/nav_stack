@@ -35,9 +35,9 @@ class IntentPath:
         gates: list of Gate. Points whose s does not increase are dropped."""
         self.intent_id = intent_id
         points = np.asarray(points, float)
-        keep = [0]
-        for i in range(1, len(points)):
-            if points[i, 0] > points[keep[-1], 0]:
+        keep = []
+        for i in range(len(points)):
+            if not keep or points[i, 0] > points[keep[-1], 0]:
                 keep.append(i)
         self.dropped = len(points) - len(keep)
         points = points[keep]
