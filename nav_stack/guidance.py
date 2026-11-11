@@ -125,8 +125,8 @@ def to_local(lat, lon, home):
 def planner_reference(path):
     """local_planner.Reference of a path. Its tangent comes from the velocity; where the path asks
     for less than 0.5 m/s (a stop), the geometric direction is used instead, at 0.5 m/s."""
-    xy = path.p[:, 1:3]
-    velocity = path.p[:, 4:6].copy()
+    xy = path.xyz[:, :2]
+    velocity = path.velocity[:, :2].copy()
     direction = np.gradient(xy, axis=0)
     norm = np.maximum(np.linalg.norm(direction, axis=1), 1e-9)
     slow = np.linalg.norm(velocity, axis=1) < 0.5
@@ -356,7 +356,7 @@ class Guidance(Node):
             self.get_logger().error(
                 f'Porte du WP n°{gate.index} laissée derrière sans y passer à moins de {gate.tolerance:.0f} m.')
 
-        if path.remaining() < END_DISTANCE_M:
+        if path.remaining < END_DISTANCE_M:
             final = path.sample(path.length)[0]
             self.publish_setpoint(final, np.zeros(3), np.zeros(3), MASK_PATH)
             if self.state != GuidanceStatus.DONE:
@@ -372,7 +372,7 @@ class Guidance(Node):
         if local is not None:     # the local plan: horizontal from it, vertical from the path
             pos[:2], vel[:2], acc[:2] = local
             waiting = self.plan.theta[-1] - self.plan.theta[0] < BLOCKED_PROGRESS_M
-            state = GuidanceStatus.BLOCKED if waiting and path.next_gate() is not None else GuidanceStatus.AVOIDING
+            state = GuidanceStatus.BLOCKED if waiting and path.next_gate is not None else GuidanceStatus.AVOIDING
         if not self.feedforward_allowed(pos[:2], measured[:2], path.progress):
             vel, acc = np.zeros(3), np.zeros(3)
         self.publish_setpoint(pos, vel, acc, MASK_PATH)
@@ -395,7 +395,7 @@ class Guidance(Node):
         except ValueError as e:
             self.reject(mode, msg.intent_id, str(e))
             return None
-        distance = float(np.hypot(*(path.start() - measured[:2])))
+        distance = float(np.hypot(*(path.start - measured[:2])))
         if distance > self.max_start_distance:
             self.reject(mode, msg.intent_id,
                         f'drone à {distance:.1f} m du premier point (max {self.max_start_distance:.0f} m)')
@@ -478,7 +478,7 @@ class Guidance(Node):
         return self.plan.at(now)
 
     def replan(self, now, path, planner, xy, obstacles):
-        gate = path.next_gate()
+        gate = path.next_gate
         if gate is not None:
             planner.gate_tol = max(gate.tolerance - GATE_MARGIN_M, 1.0)
         plan = planner.plan(path.progress, xy, self.velocity[:2], obstacles,
