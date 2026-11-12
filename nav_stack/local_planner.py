@@ -13,7 +13,10 @@ guidance calls it while an aircraft threatens. Each replan optimizes the next HO
     hard constraint, and keep-away + margin_soft_m, a mere preference. A single wide hard margin
     can make a waypoint unreachable (an aircraft circling near it), and the drone then waits forever;
   - flight boundary: the polygon edges that face the drone, hard, FENCE_MARGIN_M inside;
-  - next waypoint: within its tolerance at the step where the progression reaches it (hard).
+  - next waypoint: within its tolerance at the step where the nominal path passes nearest to it (hard).
+    When the plan cannot make it, it fails and the drone follows the path, which passes the waypoint:
+    a missed waypoint costs more than an incursion (the step used to come from the nominal progression,
+    which runs ahead of the position: 11 % of the plans failed, up to 200 m out).
 Quadratic cost, linear and second-order cone constraints: Clarabel (interior point) solves it in
 about 20 iterations, a few ms. If it fails, plan() returns None and the caller keeps its previous
 plan while that one still covers the present, else goes back to the reference.
@@ -42,7 +45,8 @@ FENCE_MARGIN_M = 10.0            # hard: from the first step, so a drone closer 
 FENCE_REACH_M = 300.0           # boundary edges farther than this are out of reach within the horizon
 FENCE_SIDE_REACH_M = 50.0       # an edge counts if the drone projects onto it, give or take this
 GATE_WINDOW_M = 8.0             # progression within this of the waypoint apex at the gate step
-NU_MAX_FACTOR = 1.15            # progression speed at most this x the reference speed
+NU_MAX_FACTOR = 1.0             # progression speed at most this x the reference speed (1.15 flew 21 m/s where
+                                # the path asked 19)
 # Cost weights
 W_LATERAL = 0.5
 W_LONGITUDINAL = 0.05
@@ -148,7 +152,7 @@ class LocalPlanner:
         self._add_aircraft(c, obstacles, o, xy_bar, r_bar, hard, soft)
         if gate is not None:
             s_apex, wp, tol = gate
-            self._add_gate(c, s_apex - th0, np.asarray(wp, float) - o, theta_bar, tol)
+            self._add_gate(c, s_apex - th0, np.asarray(wp, float) - o, theta_bar, xy_bar, tol)
 
         x = self._solve(cost, c, nx)
         if x is None:
@@ -248,10 +252,11 @@ class LocalPlanner:
                 c.ge([(POS[i, 0], n[0]), (POS[i, 1], n[1]), (soft[j, i], 1.0)], base + self.margin_soft)
 
     @staticmethod
-    def _add_gate(c, s_apex, wp, theta_bar, tol):
-        """The next waypoint, if the nominal progression reaches it within the horizon."""
+    def _add_gate(c, s_apex, wp, theta_bar, xy_bar, tol):
+        """The next waypoint, if the nominal progression reaches it within the horizon: within tol at the
+        step where the nominal path passes nearest to it."""
         if theta_bar[0] <= s_apex <= theta_bar[-1]:
-            i = max(int(np.argmin(np.abs(theta_bar - s_apex))), 1)
+            i = 1 + int(np.argmin(np.hypot(*(xy_bar[1:] - wp).T)))
             c.norm_le(POS[i, 0], POS[i, 1], float(wp[0]), float(wp[1]), tol)
             c.ge([(THETA[i], 1.0)], s_apex - GATE_WINDOW_M)
             c.le([(THETA[i], 1.0)], s_apex + GATE_WINDOW_M)

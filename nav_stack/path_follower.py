@@ -66,6 +66,12 @@ class PathFollower:
             if plan is not None:   # horizontal from the local plan, vertical from the path
                 pos[:2], vel[:2], acc[:2] = plan.at(now)
                 state = BLOCKED if self.avoidance.waiting and path.next_gate is not None else AVOIDING
+            else:
+                timed = self.avoidance.speed_on_path(now)
+                if timed is not None:   # on the path, at the timing profile's speed
+                    tangent = self.avoidance.planner.ref.at(np.array([path.progress]))[1][0]
+                    vel[:2], acc[:2] = tangent * timed[0], tangent * timed[1]
+                    state = BLOCKED if timed[0] < 0.5 else AVOIDING
         if not self.tracking_guard(pos[:2], measured[:2], path.progress):
             vel, acc = np.zeros(3), np.zeros(3)
         return pos, vel, acc, state
