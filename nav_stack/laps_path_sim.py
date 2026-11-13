@@ -33,33 +33,43 @@ class LapsPathSimulator():
   
   def get_next_objective(self, waypoint_index=None, lap_index=None):
     """
-    Si on est au départ, on veut aller vers le premier waypoint.
-    Si on est à un waypoint, on veut aller au suivant.
-     - Si le suivant est la fin du parcours, on loop au premier waypoint
-       s'il reste des tours à faire
-     - Sinon on va à la position de fin
+    - Au départ (-1, tour 0): premier waypoint.
+    - Dans un tour: waypoint suivant. Au dernier waypoint, on reboucle au premier
+      (le tour suivant commence, ou, après le dernier tour, c'est le point final).
+    - Au point final (lap_index == nb_laps): on va à end_position.
+    - À end_position (-1, lap_index == nb_laps): tout est complété.
     """
+    # `is None` et non `or`: 0 est falsy et serait remplacé par la valeur de self
+    if waypoint_index is None:
+        waypoint_index = self.waypoint_index
+    if lap_index is None:
+        lap_index = self.lap_index
 
-    waypoint_index = waypoint_index or self.waypoint_index
-    lap_index = lap_index or self.lap_index
+    nb_laps = self.params.nb_laps
+    last = len(self.waypoints) - 1
 
-    if waypoint_index == len(self.waypoints) - 1:
-        if lap_index == self.params.nb_laps - 1:
-            if self.end_position is None:
-                return None, waypoint_index, lap_index
-            return self.end_position, -1, lap_index
-        lap_index += 1
-        return self.waypoints[0], 0, lap_index
-
+    # Départ
     if waypoint_index == -1 and lap_index == 0:
-        return self.waypoints[0], 0, lap_index
+        return self.waypoints[0], 0, 0
 
-    if waypoint_index != -1:
-        waypoint_index += 1
-        return self.waypoints[waypoint_index], waypoint_index, lap_index
+    # On est déjà à end_position: tout est complété
+    if waypoint_index == -1:
+        return None, waypoint_index, lap_index
 
-    # On a tout complété
-    return None, waypoint_index, lap_index
+    # On est au premier point final (après le dernier tour): aller à end_position
+    if lap_index >= nb_laps:
+        if self.end_position is None:
+            return None, waypoint_index, lap_index
+        return self.end_position, -1, lap_index
+
+    # Fin d'un tour: reboucler au premier waypoint
+    # (après le dernier tour, lap_index devient nb_laps = point final)
+    if waypoint_index == last:
+        return self.waypoints[0], 0, lap_index + 1
+
+    # Waypoint suivant dans le tour
+    waypoint_index += 1
+    return self.waypoints[waypoint_index], waypoint_index, lap_index
 
   def get_new_speed(self, current_speed, target_speed):
     """
@@ -258,6 +268,14 @@ class LapsPathSimulator():
       
       target_speed = tuple(d * self.params.v_max for d in direction)
 
+      is_final = (self.waypoint_index == -1 and self.end_position is not None)
+      speed_cmd = self.params.v_max
+      if is_final:
+          d = self.get_distance(drone.position, objective)
+          # Décélérer lors de l'approche du dernier point.
+          speed_cmd = min(speed_cmd, math.sqrt(2 * self.params.a_max * d))
+      target_speed = tuple(c * speed_cmd for c in direction)
+
       # Tourner vers la bonne direction en allant à la vitesse target (+ vite possible)
       drone.speed, drone.acceleration = self.get_new_speed(drone.speed, target_speed)
 
@@ -278,28 +296,32 @@ class LapsPathSimulator():
       self.simplify_last_point(intent, protect_middle=prev_is_gate)
       prev_is_gate = False
 
-      if self.get_distance(drone.position, objective) <= self.params.tolerence:
+      if (not is_final and self.get_distance(drone.position, objective) <= self.params.tolerence) or (is_final and self.norm(drone.speed) < 0.01):
+        if not is_final:
         # Passage validé : la gate prend la vraie distance curviligne
-        gate = NavGate(
-          index=gate_index,
-          s_apex=float(curve_distance),
-          x=float(objective[0]), y=float(objective[1]),
-          tolerance_m=float(self.params.tolerence))
-        intent.gates.append(gate)
-        gate_index += 1
-        prev_is_gate = True   # ce point-là ne sera jamais supprimé
+          gate = NavGate(
+            index=gate_index,
+            s_apex=float(curve_distance),
+            x=float(objective[0]), y=float(objective[1]),
+            tolerance_m=float(self.params.tolerence))
+          intent.gates.append(gate)
+          gate_index += 1
+        prev_is_gate = True   # ce point-là ne sera jamais supprimé en raison du path_resolution
         objective, self.waypoint_index, self.lap_index = self.get_next_objective()
 
         if objective is None:
           # On a atteint tous les objectifs !!!
           break
 
-      if t > 1000:
-        # IMPORTANT : modifier cette ligne (ou l'enlever) si les parcours générés sont plus longs
-        # Si le code est bloqué, quitter même sans avoir fini
-        break
-
       t += self.params.dt
+
+    # En plus de décélérer, spécifier exactement la vitesse de zero à la fin
+    self.add_point_to_intent(
+        intent,
+        drone.position,
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0),
+        s=curve_distance)
 
     return intent
   
